@@ -16,7 +16,7 @@ use crate::chunk::{self, SIGNATURE};
 use crate::color::ColorType;
 use crate::filter::{self, FilterStrategy, FilterType};
 use crate::palette::PngPalette;
-use crate::reduce::{self, Reduced};
+use crate::reduce::{self, Reduced, Reductions};
 use crate::{ihdr, pack};
 
 /// IDAT payload cap. A decoder concatenates consecutive IDATs, so the split is transparent; a
@@ -421,12 +421,10 @@ impl PngEncoder {
         color: ColorType,
         out: &mut Vec<u8>,
     ) -> Result<usize> {
-        if self.auto_reduce
-            && let Some(reduced) = reduce::analyze8(samples, channels)
-        {
+        if self.auto_reduce {
             return self.write_reduced_or_native(
                 dims,
-                reduced,
+                reduce::analyze8(samples, channels),
                 |o| {
                     self.write_png(
                         (dims.width, dims.height),
@@ -457,12 +455,10 @@ impl PngEncoder {
         color: ColorType,
         out: &mut Vec<u8>,
     ) -> Result<usize> {
-        if self.auto_reduce
-            && let Some(reduced) = reduce::analyze16(samples, channels)
-        {
+        if self.auto_reduce {
             return self.write_reduced_or_native(
                 dims,
-                reduced,
+                reduce::analyze16(samples, channels),
                 |o| self.encode_16bit(dims, samples, color, o),
                 out,
             );
@@ -636,48 +632,73 @@ impl PngEncoder {
         }
     }
 
-    /// Writes `reduced`, unless it is a palette encoding that turns out *larger* than encoding
-    /// the image untouched — in which case the untouched one wins.
+    /// Writes the smallest of the encodings [`reduce::analyze8`] / [`reduce::analyze16`] made
+    /// reachable: the reduction they ranked first, the best reduction that adds no chunk, and the
+    /// image encoded untouched.
     ///
-    /// [`reduce::analyze8`] chooses by comparing **raw** sizes, and raw size does not predict
-    /// compressed size when one candidate's bytes are incompressible and the other's are not. A
-    /// palette carries a `PLTE` (and often `tRNS`) chunk that DEFLATE cannot touch, while the
-    /// pixels it replaces may compress by two orders of magnitude. On a 128x128 image with 64
-    /// colours the estimate sees 16 664 bytes against 65 536 and picks the palette by 4x — and
-    /// the finished file is 451 bytes against 405. The crossover sits near 160x160, so the
-    /// estimate is right on large images and wrong on small ones.
+    /// The analysis chooses by comparing **raw** sizes, and raw size does not predict compressed
+    /// size when one candidate's bytes are incompressible and the other's are not. A palette
+    /// carries a `PLTE` (and often `tRNS`) chunk that DEFLATE cannot touch, while the pixels it
+    /// replaces may compress by two orders of magnitude. On a 128x128 image with 64 colours the
+    /// estimate sees 16 664 bytes against 65 536 and picks the palette by 4x — and the finished
+    /// file is 451 bytes against 405. The crossover sits near 160x160, so the estimate is right on
+    /// large images and wrong on small ones.
     ///
-    /// Rather than guess a correction factor, the two candidates are encoded and the smaller
-    /// kept. That is exactly what [`FilterStrategy::BruteForce`] already does for filters, it
-    /// needs no tuned constant, and it cannot be worse than either candidate alone. A tie keeps
-    /// the palette, which decodes with less work.
+    /// Rather than guess a correction factor, the candidates are encoded and the smallest kept.
+    /// That is exactly what [`FilterStrategy::BruteForce`] already does for filters, and it needs
+    /// no tuned constant.
     ///
-    /// Only the reductions that *carry a chunk* pay for the second encode — a palette's `PLTE`
-    /// (+ `tRNS`), or a colour key's `tRNS`. Greyscale, alpha-drop and 16→8 demotion add no chunks
-    /// at all, so for them the raw comparison is sound and this returns immediately.
+    /// **Three candidates, not two.** The raw estimate collapses five reductions to one winner,
+    /// and when that winner is a palette the runner-up it eliminated is often a chunk-free
+    /// reduction — an alpha drop, a greyscale collapse, a 16→8 demotion — that *would* have won
+    /// the finished file. Racing only the palette against the unreduced image threw those away
+    /// and fell all the way back to no reduction at all: a 128x128 opaque RGBA image with 256
+    /// colours kept an alpha channel that was 255 everywhere (349 bytes against 317), and a 64x64
+    /// 16-bit image whose samples are all `k·257` kept all sixteen bits (220 against 172). So
+    /// [`Reductions`] hands over the best chunk-free candidate beside the chunk-carrying one, and
+    /// all three are measured — `tests/size_contract.rs`'s `opaque256_rgba8` and
+    /// `demotable_rgb16` rows are those two cases.
+    ///
+    /// **The total order.** Ties resolve toward the earlier of `chunked ≻ chunk-free ≻ native` —
+    /// the more reduced encoding, and, among equal-length files, the one the encoder already
+    /// emitted before the runner-up joined the race, so a tie changes no output. See
+    /// [`prefers_chunk_free`] and [`prefers_native`], where each step is stated on its own.
+    ///
+    /// Only a reduction that *carries a chunk* pays for the extra encodes — a palette's `PLTE`
+    /// (+ `tRNS`), or a colour key's `tRNS`. A chunk-free winner adds nothing DEFLATE cannot
+    /// compress, so the raw comparison that chose it is sound and it is written immediately;
+    /// that case is [`Reductions::ChunkFree`], and the analysis, not this function, decides it.
     fn write_reduced_or_native(
         &self,
         dims: Dimensions,
-        reduced: Reduced,
+        reductions: Reductions,
         native: impl FnOnce(&mut Vec<u8>) -> Result<usize>,
         out: &mut Vec<u8>,
     ) -> Result<usize> {
-        let carries_chunks = matches!(
-            reduced,
-            Reduced::Indexed { .. } | Reduced::Rgb8Keyed { .. } | Reduced::GrayKeyed { .. }
-        );
-        if !carries_chunks {
-            return self.write_reduced(dims, reduced, out);
+        let (chunked, chunk_free) = match reductions {
+            Reductions::None => return native(out),
+            Reductions::ChunkFree(reduced) => return self.write_reduced(dims, reduced, out),
+            Reductions::Chunked {
+                chunked,
+                chunk_free,
+            } => (chunked, chunk_free),
+        };
+        let mut reduced_encoding = Vec::new();
+        self.write_reduced(dims, chunked, &mut reduced_encoding)?;
+        if let Some(free) = chunk_free {
+            let mut free_encoding = Vec::new();
+            self.write_reduced(dims, free, &mut free_encoding)?;
+            if prefers_chunk_free(free_encoding.len(), reduced_encoding.len()) {
+                reduced_encoding = free_encoding;
+            }
         }
-        let mut palette_encoding = Vec::new();
-        self.write_reduced(dims, reduced, &mut palette_encoding)?;
         let mut native_encoding = Vec::new();
         native(&mut native_encoding)?;
 
-        let winner = if prefers_native(native_encoding.len(), palette_encoding.len()) {
+        let winner = if prefers_native(native_encoding.len(), reduced_encoding.len()) {
             native_encoding
         } else {
-            palette_encoding
+            reduced_encoding
         };
         out.extend_from_slice(&winner);
         Ok(winner.len())
@@ -828,11 +849,23 @@ fn prefers_plain(plain_len: usize, cleaned_len: usize) -> bool {
     plain_len < cleaned_len
 }
 
-/// Whether the unreduced encoding beats the palette one, for [`PngEncoder::write_reduced_or_native`].
+/// Whether the chunk-free reduction beats the chunk-carrying one, the first step of
+/// [`PngEncoder::write_reduced_or_native`]'s three-way race.
 ///
-/// **A tie keeps the palette**, which decodes with less work for the same bytes. Split out because
-/// engineering two encodings of the same image to land on exactly equal lengths is not something a
-/// fixture can do reliably, so the tie is only assertable here.
+/// **A tie keeps the chunk-carrying encoding**: it is the candidate the raw estimate ranked first
+/// and the one the encoder emitted before the runner-up joined the race, so an equal-length
+/// runner-up changes no output. Split out for the same reason as [`prefers_native`].
+fn prefers_chunk_free(chunk_free_len: usize, chunked_len: usize) -> bool {
+    chunk_free_len < chunked_len
+}
+
+/// Whether the unreduced encoding beats the winning reduction, for
+/// [`PngEncoder::write_reduced_or_native`].
+///
+/// **A tie keeps the reduction**, which decodes with less work for the same bytes — and where the
+/// palette won the first step, a tie here keeps the palette. Split out because engineering two
+/// encodings of the same image to land on exactly equal lengths is not something a fixture can do
+/// reliably, so the tie is only assertable here.
 fn prefers_native(native_len: usize, palette_len: usize) -> bool {
     native_len < palette_len
 }
@@ -881,12 +914,10 @@ fn write_idat(out: &mut Vec<u8>, zlib_stream: &[u8]) {
 // CMYK has no PNG colour type.
 impl EncodeImage<Gray8> for PngEncoder {
     fn encode_image(&self, image: ImageRef<'_, Gray8>, out: &mut Vec<u8>) -> Result<usize> {
-        if self.auto_reduce
-            && let Some(reduced) = reduce::analyze8(image.as_samples(), 1)
-        {
+        if self.auto_reduce {
             return self.write_reduced_or_native(
                 image.dimensions(),
-                reduced,
+                reduce::analyze8(image.as_samples(), 1),
                 |o| self.encode_8bit(image, ColorType::Grayscale, o),
                 out,
             );
@@ -915,12 +946,10 @@ impl EncodeImage<Bilevel> for PngEncoder {
 }
 impl EncodeImage<Rgb8> for PngEncoder {
     fn encode_image(&self, image: ImageRef<'_, Rgb8>, out: &mut Vec<u8>) -> Result<usize> {
-        if self.auto_reduce
-            && let Some(reduced) = reduce::analyze8(image.as_samples(), 3)
-        {
+        if self.auto_reduce {
             return self.write_reduced_or_native(
                 image.dimensions(),
-                reduced,
+                reduce::analyze8(image.as_samples(), 3),
                 |o| self.encode_8bit(image, ColorType::Truecolor, o),
                 out,
             );
@@ -959,12 +988,10 @@ impl EncodeImage<GrayAlpha8> for PngEncoder {
 impl EncodeImage<Gray16> for PngEncoder {
     fn encode_image(&self, image: ImageRef<'_, Gray16>, out: &mut Vec<u8>) -> Result<usize> {
         let (dims, samples) = (image.dimensions(), image.as_samples());
-        if self.auto_reduce
-            && let Some(reduced) = reduce::analyze16(samples, 1)
-        {
+        if self.auto_reduce {
             return self.write_reduced_or_native(
                 dims,
-                reduced,
+                reduce::analyze16(samples, 1),
                 |o| self.encode_16bit(dims, samples, ColorType::Grayscale, o),
                 out,
             );
@@ -975,12 +1002,10 @@ impl EncodeImage<Gray16> for PngEncoder {
 impl EncodeImage<Rgb16> for PngEncoder {
     fn encode_image(&self, image: ImageRef<'_, Rgb16>, out: &mut Vec<u8>) -> Result<usize> {
         let (dims, samples) = (image.dimensions(), image.as_samples());
-        if self.auto_reduce
-            && let Some(reduced) = reduce::analyze16(samples, 3)
-        {
+        if self.auto_reduce {
             return self.write_reduced_or_native(
                 dims,
-                reduced,
+                reduce::analyze16(samples, 3),
                 |o| self.encode_16bit(dims, samples, ColorType::Truecolor, o),
                 out,
             );
@@ -1165,6 +1190,19 @@ mod tests {
         assert!(prefers_native(10, 11), "smaller native wins");
         assert!(!prefers_native(11, 10), "smaller palette wins");
         assert!(!prefers_native(10, 10), "a tie keeps the palette");
+    }
+
+    #[test]
+    fn a_tie_between_the_chunk_free_runner_up_and_the_palette_keeps_the_palette() {
+        assert!(
+            prefers_chunk_free(10, 11),
+            "a smaller chunk-free reduction wins"
+        );
+        assert!(!prefers_chunk_free(11, 10), "a smaller palette wins");
+        assert!(
+            !prefers_chunk_free(10, 10),
+            "a tie keeps the chunk-carrying encoding the estimate ranked first"
+        );
     }
 
     #[test]
