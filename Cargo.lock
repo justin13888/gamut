@@ -808,6 +808,7 @@ dependencies = [
  "gamut-codec-abi",
  "gamut-core",
  "gamut-jxl-sys",
+ "gamut-metadata",
  "jxl",
 ]
 
