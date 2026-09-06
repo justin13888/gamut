@@ -84,13 +84,14 @@ fn trailing_box_is_written_after_mdat() {
 
 #[test]
 fn boxes_keep_model_order_within_each_position() {
-    // Two boxes at each position, interleaved in the model: the writer partitions by position and
-    // keeps model order inside each partition.
+    // Two boxes at each position, grouped as `write` requires (AfterFtyp then Trailing): the
+    // writer keeps model order inside each group, and the groups land on either side of the
+    // ftyp/meta/mdat spine.
     let img = image(vec![av01_item(1, vec![1, 2, 3, 4])]).with_top_level_boxes(vec![
-        TopLevelBox::new(*b"skip", vec![1]).with_position(TopLevelPosition::Trailing),
         TopLevelBox::uuid(C2PA_UUID, vec![2]),
-        TopLevelBox::new(*b"free", vec![3]).with_position(TopLevelPosition::Trailing),
         TopLevelBox::new(*b"free", vec![4]),
+        TopLevelBox::new(*b"skip", vec![1]).with_position(TopLevelPosition::Trailing),
+        TopLevelBox::new(*b"free", vec![3]).with_position(TopLevelPosition::Trailing),
     ]);
     let f = write(&img).unwrap();
 
@@ -176,4 +177,24 @@ fn written_top_level_boxes_are_fully_accounted() {
         })
         .collect();
     assert_eq!(kinds, [*b"ftyp", *b"uuid", *b"meta", *b"mdat", *b"free"]);
+}
+
+#[test]
+fn push_top_level_box_appends_within_the_position_group() {
+    // The #444 path: a parsed model already carries a trailing box; pushing a C2PA uuid box must
+    // land in the AfterFtyp group (before the trailing box), never interleaved — and the result
+    // still round-trips byte-identically.
+    let trailing = image(vec![av01_item(1, vec![1, 2, 3, 4])]).with_top_level_boxes(vec![
+        TopLevelBox::new(*b"free", vec![0xAA]).with_position(TopLevelPosition::Trailing),
+    ]);
+    let mut model = read(&write(&trailing).unwrap()).unwrap();
+    model.push_top_level_box(TopLevelBox::uuid(C2PA_UUID, b"store".to_vec()));
+    model.push_top_level_box(
+        TopLevelBox::new(*b"skip", vec![0xBB]).with_position(TopLevelPosition::Trailing),
+    );
+
+    let types: Vec<[u8; 4]> = model.top_level_boxes.iter().map(|b| b.ty).collect();
+    assert_eq!(types, [*b"uuid", *b"free", *b"skip"]);
+    let f = write(&model).unwrap();
+    assert_eq!(write(&read(&f).unwrap()).unwrap(), f);
 }

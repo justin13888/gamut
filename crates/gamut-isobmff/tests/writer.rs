@@ -4,7 +4,9 @@
 mod common;
 
 use common::{av01_item, image, item};
-use gamut_isobmff::{IsoBmffImage, ItemReference, Property, PropertyKind, TopLevelBox, write};
+use gamut_isobmff::{
+    IsoBmffImage, ItemReference, Property, PropertyKind, TopLevelBox, TopLevelPosition, write,
+};
 
 #[track_caller]
 fn assert_rejected(img: &IsoBmffImage, expected: &str) {
@@ -141,4 +143,15 @@ fn top_level_user_type_must_pair_with_the_uuid_type() {
     mistyped.user_type = Some([7; 16]);
     let img = image(vec![av01_item(1, vec![1])]).with_top_level_boxes(vec![mistyped]);
     assert_rejected(&img, "user_type is required for uuid boxes");
+}
+
+#[test]
+fn interleaved_top_level_positions_are_rejected() {
+    // The file holds every AfterFtyp box before every Trailing one, so a model listing a Trailing
+    // box first would come back from `read` re-grouped: `write` refuses it instead of reordering.
+    let img = image(vec![av01_item(1, vec![1])]).with_top_level_boxes(vec![
+        TopLevelBox::new(*b"free", vec![1]).with_position(TopLevelPosition::Trailing),
+        TopLevelBox::uuid([0xD8; 16], vec![2]),
+    ]);
+    assert_rejected(&img, "interleave positions");
 }

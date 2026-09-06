@@ -16,7 +16,9 @@
 //! Top-level boxes the model does not otherwise own — a C2PA `uuid` box, a `free`, a vendor box —
 //! are kept in [`IsoBmffImage::top_level_boxes`] as [`TopLevelBox`]es, each tagged with the
 //! [`TopLevelPosition`] the writer places it at, so a file carrying one round-trips byte-identically
-//! rather than losing the box.
+//! rather than losing the box. The list is grouped by position (every `AfterFtyp` box before every
+//! `Trailing` one) — the order the file has and [`crate::read`] produces; [`crate::write`] refuses
+//! an interleaved list, and [`IsoBmffImage::push_top_level_box`] appends without interleaving.
 
 /// A parsed or constructed ISOBMFF still-image file: its `ftyp` brands, the id of the primary
 /// (displayed) item, the image items, the entity groups, and any top-level boxes the model does not
@@ -45,8 +47,13 @@ pub struct IsoBmffImage {
     pub groups: Vec<EntityGroup>,
     /// Top-level boxes the model does not otherwise own — anything but `ftyp`, `meta` and `mdat`
     /// (and an appended motion-photo stream, which [`crate::read`] stops at) — in file order, each
-    /// carrying the [`TopLevelPosition`] it is written at. This is where a C2PA
-    /// `ContentProvenanceBox` (a `uuid` box with the C2PA user type) lives; usually empty.
+    /// carrying the [`TopLevelPosition`] it is written at. File order means grouped by position:
+    /// every [`AfterFtyp`](TopLevelPosition::AfterFtyp) box precedes every
+    /// [`Trailing`](TopLevelPosition::Trailing) one, which is how [`crate::read`] fills the list and
+    /// what [`crate::write`] requires (an interleaved list cannot round-trip, so it is rejected as
+    /// `InvalidInput`); [`push_top_level_box`](Self::push_top_level_box) appends without breaking
+    /// the grouping. This is where a C2PA `ContentProvenanceBox` (a `uuid` box with the C2PA user
+    /// type) lives; usually empty.
     pub top_level_boxes: Vec<TopLevelBox>,
 }
 
@@ -96,11 +103,43 @@ impl IsoBmffImage {
     }
 
     /// Sets the top-level boxes the model does not otherwise own (see
-    /// [`top_level_boxes`](Self::top_level_boxes)).
+    /// [`top_level_boxes`](Self::top_level_boxes)). The list must be grouped by position for
+    /// [`crate::write`] to accept it; prefer [`push_top_level_box`](Self::push_top_level_box) when
+    /// adding to an existing list.
     #[must_use]
     pub fn with_top_level_boxes(mut self, top_level_boxes: Vec<TopLevelBox>) -> Self {
         self.top_level_boxes = top_level_boxes;
         self
+    }
+
+    /// Appends `top` to [`top_level_boxes`](Self::top_level_boxes) at the end of its position
+    /// group — an [`AfterFtyp`](TopLevelPosition::AfterFtyp) box goes after the last `AfterFtyp`
+    /// box and before the first [`Trailing`](TopLevelPosition::Trailing) one, a `Trailing` box goes
+    /// last — so appending to a parsed model that already carries trailing boxes never builds the
+    /// interleaved list [`crate::write`] refuses. This is how a C2PA box is added to a file read
+    /// from disk.
+    ///
+    /// ```
+    /// use gamut_isobmff::{IsoBmffImage, Item, TopLevelBox, TopLevelPosition};
+    ///
+    /// let mut img = IsoBmffImage::new(*b"avif", vec![*b"mif1"], 1, Vec::<Item>::new())
+    ///     .with_top_level_boxes(vec![
+    ///         TopLevelBox::new(*b"free", vec![]).with_position(TopLevelPosition::Trailing),
+    ///     ]);
+    /// img.push_top_level_box(TopLevelBox::uuid([0xD8; 16], vec![1]));
+    /// assert_eq!(img.top_level_boxes[0].ty, *b"uuid");
+    /// assert_eq!(img.top_level_boxes[1].ty, *b"free");
+    /// ```
+    pub fn push_top_level_box(&mut self, top: TopLevelBox) {
+        let index = match top.position {
+            TopLevelPosition::AfterFtyp => self
+                .top_level_boxes
+                .iter()
+                .position(|b| b.position == TopLevelPosition::Trailing)
+                .unwrap_or(self.top_level_boxes.len()),
+            TopLevelPosition::Trailing => self.top_level_boxes.len(),
+        };
+        self.top_level_boxes.insert(index, top);
     }
 }
 

@@ -86,8 +86,11 @@ move between two lawful positions: §A.5.3 requires only after `ftyp` and before
 position can be added later without a major bump. Files this crate writes round-trip
 byte-identically. `write` rejects a top-level box typed `ftyp`/`meta`/`mdat` (the model emits
 those itself), `moov`/`trak` (image sequences, `Unsupported` as on read), one whose `user_type`
-does not pair with the `uuid` type, or one whose complete box (header included) does not fit the
-32-bit size field.
+does not pair with the `uuid` type, one whose complete box (header included) does not fit the
+32-bit size field, or a list that interleaves positions (an `AfterFtyp` box after a `Trailing`
+one) — the file holds the groups in order, so `read` could not give the interleaved order back;
+`IsoBmffImage::push_top_level_box` appends at the end of a box's position group so a parsed
+model that already carries trailing boxes never becomes interleaved.
 
 Two costs of retaining rather than dropping, accepted knowingly:
 

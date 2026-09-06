@@ -52,7 +52,8 @@ type ItemAssociations = Vec<(u32, Vec<(u16, bool)>)>;
 /// `idat`-stored data inlined), so writing it back yields an equivalent — not byte-identical —
 /// file. `read(&`[`write`](crate::write)`(&img)?) == img` holds for anything `write` accepts.
 /// Top-level boxes the model does not otherwise own are retained in
-/// [`IsoBmffImage::top_level_boxes`] (see the [module docs](self#top-level-boxes)).
+/// [`IsoBmffImage::top_level_boxes`] in file order — every `AfterFtyp` box before every
+/// `Trailing` one, the grouping `write` requires (see the [module docs](self#top-level-boxes)).
 ///
 /// The top-level walk models only the primary still-image stream and tolerates an appended foreign
 /// "motion photo" stream — see the [module docs](self#motion-photo-tolerance): it stops at a second

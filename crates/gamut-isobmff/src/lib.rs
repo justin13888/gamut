@@ -5,7 +5,9 @@
 //! file (`ftyp` + a `meta` box of image items + `mdat`) and leaves the coded bitstream opaque
 //! ([`PropertyKind::CodecConfiguration`] for the `av1C`/`hvcC` record, [`Item::payload`] for the
 //! samples). [`write()`] serialises an [`IsoBmffImage`]; [`read`] parses one back. The two are
-//! inverse for any file this crate writes (`read(&write(&img)?) == img`).
+//! inverse for any file this crate writes (`read(&write(&img)?) == img`) — which is why [`write()`]
+//! validates the model first and refuses what could not come back, a `top_level_boxes` list that
+//! interleaves positions among it.
 //!
 //! It is image-first: the modelled surface is the HEIF still-image set — `ftyp`, `meta` with
 //! `hdlr`/`pitm`/`iloc`/`iinf`/`iref`/`iprp`/`idat`/`grpl`, the

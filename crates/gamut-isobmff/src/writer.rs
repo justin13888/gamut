@@ -31,9 +31,12 @@ use crate::model::{
 /// Returns [`Error::InvalidInput`] for a model that cannot round-trip: a `primary_item_id` naming
 /// no item, duplicate item ids, an interior NUL in a name/content-type/encoding/aux-type string,
 /// an empty `content_encoding`, a `content_type` on a non-`mime` item (or a `mime` item without
-/// one), an out-of-range `Rotation`/`Mirror` value, or a top-level box whose type the writer
+/// one), an out-of-range `Rotation`/`Mirror` value, a top-level box whose type the writer
 /// emits from the model itself (`ftyp`/`meta`/`mdat`) or whose `user_type` does not pair with a
-/// `uuid` type. Returns [`Error::Unsupported`] for a model that does not fit the still-image box
+/// `uuid` type, or a `top_level_boxes` list that interleaves positions (an `AfterFtyp` box after
+/// a `Trailing` one — the file cannot record that order, so `read` could not reproduce it; use
+/// [`IsoBmffImage::push_top_level_box`] to append). Returns [`Error::Unsupported`] for a model
+/// that does not fit the still-image box
 /// versions this crate writes: item ids above `u16::MAX`, `uri ` items, more than 255 properties or
 /// 65 535 reference targets per item, more than 32 767 distinct properties, more than 65 535
 /// items, a `moov`/`trak` top-level box (image sequences), or a payload/box/file at 4 GiB or
@@ -88,8 +91,24 @@ fn validate(image: &IsoBmffImage) -> Result<()> {
         }
         validate_item(item)?;
     }
+    // The file holds every AfterFtyp box before every Trailing one, so a model whose list
+    // interleaves the two would come back re-grouped from `read`: refuse it rather than silently
+    // reorder.
+    let mut seen_trailing = false;
     for top in &image.top_level_boxes {
         validate_top_level(top)?;
+        match top.position {
+            TopLevelPosition::Trailing => seen_trailing = true,
+            TopLevelPosition::AfterFtyp if seen_trailing => {
+                return Err(Error::invalid_input(
+                    env!("CARGO_PKG_NAME"),
+                    "ISOBMFF: top_level_boxes interleave positions (an AfterFtyp box follows a \
+                     Trailing one); order them AfterFtyp then Trailing, or append with \
+                     IsoBmffImage::push_top_level_box",
+                ));
+            }
+            TopLevelPosition::AfterFtyp => {}
+        }
     }
     Ok(())
 }
