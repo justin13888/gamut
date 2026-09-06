@@ -557,8 +557,10 @@ fn the_chunk_ceiling_admits_exactly_its_own_count_and_refuses_one_more() {
     // The chunk count is chosen by the input -- a chunk costs 12 bytes and buys a segment -- so
     // the walk caps it. Asserted *at the boundary* rather than far past it: a file well over the
     // ceiling is refused by `>`, `>=` and `==` alike, so only the exact count separates them.
-    // Eleven segments here: the signature, IHDR, eight fillers and IEND.
-    const SEGMENTS: usize = 11;
+    // Ten chunks here — IHDR, eight fillers and IEND — under eleven segments, because the
+    // signature is a segment but not a chunk: `max_chunks` counts what its name says, so a
+    // ceiling of ten admits this file and a ceiling of nine refuses it.
+    const CHUNKS: usize = 10;
     let mut chunks = vec![common::chunk(b"IHDR", &common::ihdr_payload(1, 1, 8, 0, 0))];
     for _ in 0..8 {
         chunks.push(common::chunk(b"crUD", &[]));
@@ -566,13 +568,17 @@ fn the_chunk_ceiling_admits_exactly_its_own_count_and_refuses_one_more() {
     chunks.push(common::chunk(b"IEND", &[]));
     let png = common::png_from_chunks(&chunks);
 
-    let exact = DeconstructLimits::default().with_max_chunks(SEGMENTS);
+    let exact = DeconstructLimits::default().with_max_chunks(CHUNKS);
     let report = deconstruct_with_limits(&png, exact)
         .expect("a file of exactly the ceiling's size is admitted, not refused");
-    assert_eq!(report.segments.len(), SEGMENTS);
+    assert_eq!(
+        report.segments.len(),
+        CHUNKS + 1,
+        "the signature segment is not a chunk"
+    );
     assert!(report.is_fully_classified(), "and it reports normally");
 
-    let one_short = DeconstructLimits::default().with_max_chunks(SEGMENTS - 1);
+    let one_short = DeconstructLimits::default().with_max_chunks(CHUNKS - 1);
     let err = deconstruct_with_limits(&png, one_short)
         .expect_err("one past the ceiling the walk refuses rather than allocating");
     assert!(

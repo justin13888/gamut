@@ -601,7 +601,10 @@ pub fn deconstruct_with_limits(png: &[u8], limits: DeconstructLimits) -> Result<
                 }
                 let is_iend = &chunk.chunk_type == b"IEND";
                 push(&mut segments, &mut tally, &chunk);
-                if segments.len() > limits.max_chunks {
+                // The signature segment is not a chunk, so the ceiling is over one fewer than
+                // the segments materialized so far.
+                let chunks_so_far = segments.len() - 1;
+                if chunks_so_far > limits.max_chunks {
                     return Err(Error::invalid_input(
                         env!("CARGO_PKG_NAME"),
                         "PNG: more chunks than the walk's ceiling admits",
