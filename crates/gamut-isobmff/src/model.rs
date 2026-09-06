@@ -116,7 +116,11 @@ impl IsoBmffImage {
 /// The C2PA `ContentProvenanceBox` (C2PA 2.4 §A.5.1) is a `uuid` box with user type
 /// `D8FEC3D6-1B0E-483C-9297-5828877EC481`; its payload — the `FullBox` version/flags, the
 /// `box_purpose` string and the manifest store — is opaque here.
+///
+/// Non-exhaustive: build it with [`TopLevelBox::new`] / [`TopLevelBox::uuid`] and
+/// [`with_position`](Self::with_position) (or assign the public fields), not a struct literal.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct TopLevelBox {
     /// The box type four-character code (e.g. `*b"uuid"`, `*b"free"`).
     pub ty: [u8; 4],
@@ -165,12 +169,15 @@ impl TopLevelBox {
 /// [`crate::read`] assigns the position from where it found the box: before `mdat` (whether
 /// before or after `meta`) is [`AfterFtyp`](Self::AfterFtyp), after `mdat` is
 /// [`Trailing`](Self::Trailing). A box a foreign file put between `meta` and `mdat` is therefore
-/// written back between `ftyp` and `meta` — the one reordering the round-trip performs, and never
-/// one that moves a lawfully placed C2PA box (§A.5.3 requires it before the first `mdat`).
+/// written back between `ftyp` and `meta` — the one reordering the round-trip performs. For a
+/// C2PA box that is a move between two lawful positions: §A.5.3 requires only after `ftyp` and
+/// before the first `mdat` (and any `moov`), which both satisfy.
 ///
-/// Discriminants are permanent and append-only.
+/// Non-exhaustive, with permanent append-only discriminants: a finer position (e.g. between
+/// `meta` and `mdat`) may be added in a minor release, so match with a wildcard arm.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
+#[non_exhaustive]
 pub enum TopLevelPosition {
     /// After `ftyp` and before `meta` (so also before the first `mdat`): the C2PA 2.4 §A.5.3
     /// placement.

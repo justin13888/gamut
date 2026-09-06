@@ -137,9 +137,8 @@ fn top_level_user_type_must_pair_with_the_uuid_type() {
         .with_top_level_boxes(vec![TopLevelBox::new(*b"uuid", vec![1])]);
     assert_rejected(&img, "user_type is required for uuid boxes");
 
-    let img = image(vec![av01_item(1, vec![1])]).with_top_level_boxes(vec![TopLevelBox {
-        user_type: Some([7; 16]),
-        ..TopLevelBox::new(*b"free", vec![1])
-    }]);
+    let mut mistyped = TopLevelBox::new(*b"free", vec![1]);
+    mistyped.user_type = Some([7; 16]);
+    let img = image(vec![av01_item(1, vec![1])]).with_top_level_boxes(vec![mistyped]);
     assert_rejected(&img, "user_type is required for uuid boxes");
 }

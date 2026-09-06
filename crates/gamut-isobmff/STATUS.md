@@ -36,7 +36,7 @@ files.
 | P4 | 14496-12; 23008-12 | Reader: bounds-checked box walk including `largesize`, size-0, and UUID user types; foreign-file repertoire (`iloc` v0–v2, `mdat`/`idat`, base offsets, 0/4/8-byte fields, multi-extent, `pitm`/`ipma` v0–v1, `infe` v2–v3, `iref` v0–v1); motion-photo tolerance (stop at a second top-level `ftyp` / at a malformed trailing box once `ftyp`+`meta` are seen); `read(&write)` round-trip; unrecognised property boxes preserved verbatim | ✅ done |
 | P5 | — | Robustness: truncation/overrun/size/index guards ✅; counts never trusted for allocation ✅; total payload capped at input size (anti amplification) ✅; spec fixtures independent of the writer ✅; fuzz corpus ☐ | ◑ partial |
 | P6 | — | Differential oracle: libavif/dav1d parses the container and reproduces pixels (via `gamut-avif/tests/decode_roundtrip.rs`) | ✅ via codec |
-| P7 | 14496-12 §4.2; C2PA 2.4 §A.5.3 | Top-level boxes the model does not otherwise own (`IsoBmffImage::top_level_boxes`, #443): retained on read with the position they were found at, written after `ftyp` (`AfterFtyp`) or after `mdat` (`Trailing`); `read`→`write` byte-identical for a file carrying them; libavif decodes an AVIF carrying a C2PA `uuid` box unchanged (`gamut-avif/tests/remux_roundtrip.rs`) | ✅ done |
+| P7 | 14496-12 §4.2; C2PA 2.4 §A.5.3 | Top-level boxes the model does not otherwise own (`IsoBmffImage::top_level_boxes`, #443): retained on read with the position they were found at, written after `ftyp` (`AfterFtyp`) or after `mdat` (`Trailing`); `read`→`write` byte-identical for a file *this crate wrote* carrying them (foreign files stay equivalent-but-normalised); libavif decodes an AVIF carrying a C2PA `uuid` box unchanged (`gamut-avif/tests/remux_roundtrip.rs`) | ✅ done |
 
 ## Demonstration surface
 
@@ -80,11 +80,25 @@ verbatim, and a `TopLevelPosition`:
 
 `read` assigns the position from where it met the box: after `mdat` → `Trailing`, otherwise
 `AfterFtyp`. A box a foreign file placed *between* `meta` and `mdat` is therefore written back
-between `ftyp` and `meta` — the one reordering the round-trip performs; a C2PA box there is not a
-lawful §A.5.3 placement anyway. Files this crate writes round-trip byte-identically. `write`
-rejects a top-level box typed `ftyp`/`meta`/`mdat` (the model emits those itself), `moov`/`trak`
-(image sequences, `Unsupported` as on read), or one whose `user_type` does not pair with the
-`uuid` type.
+between `ftyp` and `meta` — the one reordering the round-trip performs. For a C2PA box that is a
+move between two lawful positions: §A.5.3 requires only after `ftyp` and before the first `mdat`
+(and any `moov`), and both satisfy it. `TopLevelPosition` is `#[non_exhaustive]` so a finer
+position can be added later without a major bump. Files this crate writes round-trip
+byte-identically. `write` rejects a top-level box typed `ftyp`/`meta`/`mdat` (the model emits
+those itself), `moov`/`trak` (image sequences, `Unsupported` as on read), one whose `user_type`
+does not pair with the `uuid` type, or one whose complete box (header included) does not fit the
+32-bit size field.
+
+Two costs of retaining rather than dropping, accepted knowingly:
+
+- **A retained box is an owned copy.** A motion-photo `mpvd` box (Google) that carries a whole
+  video is copied into the model on `read`, where it was previously skipped; the copy is bounded
+  by the input size, and `walk_segments` continues to surface the same bytes zero-copy for
+  consumers that only account for them.
+- **An `iloc` extent may address bytes inside a retained box** (the reader resolves extents
+  against the whole file). Such bytes are then carried twice on `write` — once verbatim in the box,
+  once as the item's payload in `mdat`. No known encoder does this; a file that does still
+  decodes identically, it is merely larger.
 
 Deliberately **not** here: parsing the C2PA `box_purpose`, merkle offset or JUMBF `LBox` — that
 typed lens is `gamut-heic`'s `c2pa` module (#429); modelling a manifest store as an item (C2PA

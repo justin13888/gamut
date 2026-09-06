@@ -149,24 +149,9 @@ fn reader_positions_boxes_by_whether_mdat_precedes_them() {
     assert_eq!(
         img.top_level_boxes,
         vec![
-            TopLevelBox {
-                ty: *b"uuid",
-                user_type: Some(C2PA_UUID),
-                payload: b"store".to_vec(),
-                position: TopLevelPosition::AfterFtyp,
-            },
-            TopLevelBox {
-                ty: *b"skip",
-                user_type: None,
-                payload: b"between".to_vec(),
-                position: TopLevelPosition::AfterFtyp,
-            },
-            TopLevelBox {
-                ty: *b"free",
-                user_type: None,
-                payload: b"after".to_vec(),
-                position: TopLevelPosition::Trailing,
-            },
+            TopLevelBox::uuid(C2PA_UUID, b"store".to_vec()),
+            TopLevelBox::new(*b"skip", b"between".to_vec()),
+            TopLevelBox::new(*b"free", b"after".to_vec()).with_position(TopLevelPosition::Trailing),
         ]
     );
 }
