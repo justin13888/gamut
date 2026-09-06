@@ -595,6 +595,9 @@ mod tests {
         // Grey to RGB where the channels agree, and never to a differing RGB.
         assert_eq!(sbit_for(&[7], ColorType::Truecolor, 8), Some(vec![7, 7, 7]));
         assert_eq!(sbit_for(&[5, 6, 5], ColorType::Grayscale, 8), None);
+        // All three must agree, not any two: one agreeing pair is still not a grey.
+        assert_eq!(sbit_for(&[5, 5, 6], ColorType::Grayscale, 8), None);
+        assert_eq!(sbit_for(&[6, 5, 5], ColorType::GrayscaleAlpha, 8), None);
         // An alpha entry cannot be invented.
         assert_eq!(sbit_for(&[5, 6, 5], ColorType::TruecolorAlpha, 8), None);
         assert_eq!(sbit_for(&[7], ColorType::GrayscaleAlpha, 8), None);
