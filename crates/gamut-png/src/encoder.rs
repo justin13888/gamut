@@ -207,6 +207,13 @@ impl PngEncoder {
 
     /// Records the number of significant bits per channel (sBIT chunk). The length must match the
     /// colour type (1 for grey, 2 for grey+alpha, 3 for RGB/indexed, 4 for RGBA).
+    ///
+    /// Emitted for the colour type actually **written**, which under
+    /// [`with_auto_reduce`](Self::with_auto_reduce) may differ from the input's: the entries are
+    /// converted where that is lossless (an alpha entry dropped with its channel, RGB collapsed
+    /// to grey where the three agree) and the chunk is **omitted, without error,** where the
+    /// written colour type or depth cannot carry them — a reduction is never refused to keep a
+    /// metadata chunk. See `STATUS.md`, "Chunks that follow the race".
     #[must_use]
     pub fn with_significant_bits(mut self, bits: &[u8]) -> Self {
         self.ancillary.sbit = Some(bits.to_vec());
@@ -214,6 +221,12 @@ impl PngEncoder {
     }
 
     /// Records a greyscale background colour (bKGD chunk) for greyscale images.
+    ///
+    /// Emitted for the colour type actually **written**, which under
+    /// [`with_auto_reduce`](Self::with_auto_reduce) may differ from the input's: converted where
+    /// that is lossless (to an RGB triple, or to the palette entry holding the grey) and
+    /// **omitted, without error,** where the written colour type or depth cannot carry it. See
+    /// `STATUS.md`, "Chunks that follow the race".
     #[must_use]
     pub fn with_background_gray(mut self, gray: u16) -> Self {
         self.ancillary.bkgd = Some(gray.to_be_bytes().to_vec());
@@ -221,6 +234,13 @@ impl PngEncoder {
     }
 
     /// Records an RGB background colour (bKGD chunk) for truecolour images.
+    ///
+    /// Emitted for the colour type actually **written**, which under
+    /// [`with_auto_reduce`](Self::with_auto_reduce) may differ from the input's: converted where
+    /// that is lossless (to one grey sample where the channels agree, or to the palette entry
+    /// holding the colour — an opaque one where a transparent twin exists) and **omitted, without
+    /// error,** where the written colour type or depth cannot carry it. See `STATUS.md`, "Chunks
+    /// that follow the race".
     #[must_use]
     pub fn with_background_rgb(mut self, red: u16, green: u16, blue: u16) -> Self {
         let mut data = Vec::with_capacity(6);
@@ -232,6 +252,14 @@ impl PngEncoder {
     }
 
     /// Records a palette-index background colour (bKGD chunk) for indexed images.
+    ///
+    /// The index names an entry of the palette **you** supply to
+    /// [`encode_indexed8`](Self::encode_indexed8), and is emitted only there (and only in range).
+    /// Under [`with_auto_reduce`](Self::with_auto_reduce) the palette, if one is written, is the
+    /// encoder's own, in an order this index never referred to, so the chunk is **omitted,
+    /// without error** — set the background as a colour ([`with_background_rgb`](Self::with_background_rgb))
+    /// to have it resolved against whatever is written. See `STATUS.md`, "Chunks that follow the
+    /// race".
     #[must_use]
     pub fn with_background_index(mut self, index: u8) -> Self {
         self.ancillary.bkgd = Some(vec![index]);

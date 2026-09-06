@@ -763,6 +763,14 @@ fn fits_decode_budget(header: &ihdr::Ihdr, max_image_bytes: usize) -> bool {
 /// bomb — and above [`DEFAULT_MAX_IMAGE_BYTES`] the walk stops assuming the former. A flat 16k×16k
 /// image is the one real file this declines, and it is declined as the reader's budget
 /// ([`SkippedFilterScan::OverBudget`]), not as damage.
+///
+/// What a small hostile file can still cost, numerically: inside the default budget the ratio
+/// does not apply, so a few-kilobyte stream declaring an image that just fits 64 MiB is inflated
+/// to that image's filtered length — 64 MiB plus one byte per scanline, 64 MiB + 4 KiB for
+/// 4096×4096 RGBA8 and up to 128 MiB for a degenerate one-pixel-wide greyscale column. That is
+/// exactly the decoder's own default exposure to the same header (`PngDecoder` allocates it),
+/// so the walk is never a cheaper bomb target than a decode; the ratio only stops a *raised*
+/// image budget from becoming one.
 const INFLATION_RATIO: usize = 64;
 
 /// Whether a stream of `idat_len` compressed bytes may be inflated to `filtered_len`: it must

@@ -8,9 +8,15 @@
 //! palette, a greyscale or a colour-keyed truecolour image in place of the input's layout, and the
 //! palette and colour-key candidates are *raced* against the unreduced encoding on compressed
 //! size, so which one lands is not knowable when the chunk is set. Both are therefore emitted for
-//! the header actually written — converted where a lossless conversion exists, omitted otherwise
-//! ([`bkgd_for`], [`sbit_for`]) — rather than verbatim, because a payload shaped for the wrong
-//! colour type is a chunk a reader rejects and drops.
+//! the header actually written — converted across colour types where a lossless conversion
+//! exists, omitted otherwise ([`bkgd_for`], [`sbit_for`]) — rather than verbatim, because a
+//! payload shaped for the wrong colour type is a chunk a reader rejects and drops.
+//!
+//! That contract holds across colour **types**. On the depth axis it is weaker: a `bKGD` sample is
+//! checked against the written depth and omitted when out of range, but it is not *rescaled* when
+//! auto-reduce demoted the samples (16→8 by `v / 257`, sub-byte grey by the depth's scale), so a
+//! sample inside the written range keeps its input-depth value. That is issue #501, not this
+//! module's claim.
 
 use gamut_deflate::{DeflateEncoder, Level};
 

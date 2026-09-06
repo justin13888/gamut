@@ -180,9 +180,13 @@ cost model; a model good enough to skip the losing candidate is [#480]'s remaind
 **Chunks that follow the race.** `bKGD` and `sBIT` have a payload whose shape is the colour type, and
 the race decides the colour type after they were set. Both are resolved against the header actually
 written — RGBA `sBIT` loses its alpha entry under RGB or a palette, an RGB or grey background under a
-palette becomes the index of its entry, a grey RGB triple collapses to one grey sample — and omitted
-where no lossless conversion exists, since a payload shaped for the wrong colour type is a chunk
-libpng rejects and drops.
+palette becomes the index of its entry (an opaque entry where a transparent twin exists), a grey RGB
+triple collapses to one grey sample — and omitted, without error, where no lossless conversion
+exists, since a payload shaped for the wrong colour type is a chunk libpng rejects and drops. A
+caller's palette *index* survives only on the `encode_indexed8` path, whose palette is the caller's;
+under an encoder-derived palette it names nothing and is omitted. This holds across colour
+**types**; on the depth axis a `bKGD` sample is range-checked but not rescaled with a 16→8 demotion
+or a sub-byte packing — that is [#501].
 
 [#437]: https://github.com/visualcommons/gamut/issues/437
 [#478]: https://github.com/visualcommons/gamut/issues/478
@@ -192,3 +196,4 @@ libpng rejects and drops.
 [#482]: https://github.com/visualcommons/gamut/issues/482
 [#483]: https://github.com/visualcommons/gamut/issues/483
 [#484]: https://github.com/visualcommons/gamut/issues/484
+[#501]: https://github.com/visualcommons/gamut/issues/501
