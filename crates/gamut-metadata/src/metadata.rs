@@ -151,10 +151,12 @@ impl Metadata {
     /// reserved for external manifests (§11.5), but nothing stops a file from carrying both, and
     /// this reports what the file carries rather than choosing between them.
     ///
-    /// The URL comes back as the XMP carried it; **gamut never resolves it** (see
-    /// [`ProvenanceState`]). An empty value is treated as no URL — §11.5 makes the value a URI
-    /// reference, which an empty string is not — and a non-simple value (an array or structure) is
-    /// ignored. The HTTP `Link` header route of §15.5.3.2 is deliberately not modelled: see the
+    /// The URL comes back as the XMP carried it, with surrounding whitespace trimmed; **gamut
+    /// never resolves it** (see [`ProvenanceState`]). A value that is empty or whitespace-only is
+    /// treated as no URL — §11.5 makes the value a URI reference, which neither is — and a
+    /// non-simple value (an array or structure) is ignored. Should a non-canonical graph carry
+    /// the property twice, the first occurrence wins, as [`XmpMeta::get`] defines. The HTTP `Link`
+    /// header route of §15.5.3.2 is deliberately not modelled: see the
     /// [`provenance`](crate::provenance) module.
     #[must_use]
     pub fn provenance(&self) -> ProvenanceState {
@@ -162,6 +164,7 @@ impl Metadata {
             .xmp
             .as_ref()
             .and_then(|xmp| xmp.get_text(WellKnownNs::DcTerms.uri(), "provenance"))
+            .map(str::trim)
             .filter(|url| !url.is_empty());
         match (self.c2pa.is_some(), remote) {
             (false, None) => ProvenanceState::None,
@@ -300,6 +303,36 @@ mod tests {
             ..empty
         };
         assert_eq!(with_store.provenance(), ProvenanceState::Embedded);
+    }
+
+    #[test]
+    fn provenance_trims_the_url_and_treats_whitespace_only_as_no_url() {
+        // The same reason as the empty value: a URI reference has no surrounding whitespace, and
+        // `Remote("   ")` would hand a caller nothing to fetch. Padding around a real URL is
+        // pretty-printing noise, not part of the reference.
+        let blank = Metadata {
+            xmp: Some(xmp_with(WellKnownNs::DcTerms.uri(), "provenance", " \n\t ")),
+            ..Default::default()
+        };
+        assert_eq!(blank.provenance(), ProvenanceState::None);
+        let blank_with_store = Metadata {
+            c2pa: Some(vec![0x00, 0x00, 0x00, 0x14]),
+            ..blank
+        };
+        assert_eq!(blank_with_store.provenance(), ProvenanceState::Embedded);
+
+        let padded = Metadata {
+            xmp: Some(xmp_with(
+                WellKnownNs::DcTerms.uri(),
+                "provenance",
+                "\n  https://example.com/m.c2pa  \n",
+            )),
+            ..Default::default()
+        };
+        assert_eq!(
+            padded.provenance(),
+            ProvenanceState::Remote("https://example.com/m.c2pa".to_owned())
+        );
     }
 
     #[test]
