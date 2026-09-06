@@ -388,12 +388,14 @@ mod tests {
 
     #[test]
     fn manifest_stores_reads_top_level_uuid_boxes_only_and_offsets_by_the_segment() {
-        // Two uuid boxes, one foreign `free` box and the one non-C2PA uuid box between them: the
-        // stores come back in file order, each at the offset its segment gives, and nothing else
-        // is reported.
+        // Two C2PA uuid boxes, a non-C2PA uuid box between them, and a `free` box whose body is
+        // byte-for-byte a C2PA payload: the stores come back in file order, each at the offset
+        // its segment gives, and nothing else is reported — §A.5.1.1 fixes the box type to
+        // `uuid`, so the locator keys on the type, never on the body alone.
         let first = body(C2PA_UUID, [0; 4], b"original", &data(0, &[7, 7]));
         let foreign = body([0xAA; 16], [0; 4], b"manifest", &data(0, &[9]));
         let second = body(C2PA_UUID, [0; 4], b"update", &data(0, &[8, 8, 8]));
+        let free = body(C2PA_UUID, [0; 4], b"manifest", &data(0, &[6]));
         let segments = vec![
             Segment {
                 range: 0..20,
@@ -417,10 +419,10 @@ mod tests {
                 },
             },
             Segment {
-                range: 200..208,
+                range: 200..200 + 8 + free.len(),
                 kind: SegmentKind::Box {
                     ty: *b"free",
-                    body: &[],
+                    body: &free,
                 },
             },
             Segment {
