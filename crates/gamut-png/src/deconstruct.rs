@@ -185,7 +185,7 @@ impl FilterScan {
     /// Whether the scan actually ran, so the counts describe bytes this reader read.
     ///
     /// The complement of [`is_damage`](Self::is_damage) only for a scan that ran: a skip is
-    /// either damage or a budget refusal, and **neither is a verification**. A caller grading a
+    /// either damage or a refusal to read, and **neither is a verification**. A caller grading a
     /// file — [`PngReport::is_verified`], an archival gate — asks this; a caller asking whether
     /// anything is known to be *wrong* asks `is_damage`.
     #[must_use]
@@ -215,11 +215,9 @@ impl FilterScan {
 #[non_exhaustive]
 pub enum SkippedFilterScan {
     /// The image the header describes is larger than this reader's byte budget, so the walk
-    /// declined to inflate a stream a decode would refuse to allocate — or the image is past the
-    /// decoder's default budget and the stream is too short to plausibly inflate to it (more than
-    /// sixty-four times its own length), which is the shape of a zlib bomb under a permissive
-    /// budget. **Nothing is known to be wrong with the file** — it may be a perfectly sound very
-    /// large PNG.
+    /// declined to inflate a stream a decode would refuse to allocate. **Nothing is known to be
+    /// wrong with the file** — it may be a perfectly sound very large PNG, read by raising
+    /// [`DeconstructLimits::max_image_bytes`].
     OverBudget = 0,
     /// The IDAT stream is not a valid zlib stream, is truncated, or inflates past the length the
     /// header implies.
@@ -229,18 +227,30 @@ pub enum SkippedFilterScan {
     LengthMismatch = 2,
     /// A scanline's leading byte is not one of the five filter codes §9.1 defines.
     UndefinedFilterCode = 3,
+    /// The image fits this reader's byte budget but is past the decoder's default one, and the
+    /// IDAT stream is too short to plausibly inflate to it — more than sixty-four times its own
+    /// length — which is the shape of a zlib bomb under a permissive budget.
+    ///
+    /// Distinct from [`OverBudget`](Self::OverBudget), which the image *exceeding* the budget
+    /// raises: a file refused here is one whose declared image the budget admits, so saying it is
+    /// too large would name a limit it does not cross. **Nothing is known to be wrong with the
+    /// file** either — a flat 16384×16384 image really does compress this far — only that this
+    /// reader will not spend the budget to find out.
+    ImplausibleInflation = 4,
 }
 
 impl SkippedFilterScan {
     /// Whether this reason means the **file** is damaged, rather than merely unread.
     ///
     /// The single source of truth for that question, so no caller has to re-derive it from the
-    /// variant list. [`OverBudget`](Self::OverBudget) is the only reason that is not damage: it
-    /// describes the reader's budget, not the file. Every other reason is a statement about the
+    /// variant list. The two reasons that are not damage are the two refusals to read —
+    /// [`OverBudget`](Self::OverBudget) and
+    /// [`ImplausibleInflation`](Self::ImplausibleInflation) — which describe what this reader was
+    /// willing to spend, not what the file contains. Every other reason is a statement about the
     /// bytes, and a future reason is damage until it says otherwise.
     #[must_use]
     pub fn is_damage(self) -> bool {
-        !matches!(self, Self::OverBudget)
+        !matches!(self, Self::OverBudget | Self::ImplausibleInflation)
     }
 }
 
@@ -536,7 +546,9 @@ pub struct DeconstructLimits {
     /// Raising it past the decoder's default admits larger *images*, not larger *inflations from
     /// small files*: above that default the walk also refuses, before inflating, a stream that
     /// would grow to more than sixty-four times its own length, so a permissive budget cannot be
-    /// spent by a zlib bomb. That refusal is the same [`SkippedFilterScan::OverBudget`].
+    /// spent by a zlib bomb. That refusal reports
+    /// [`SkippedFilterScan::ImplausibleInflation`] — the image fits this budget, so it is not
+    /// [`OverBudget`](SkippedFilterScan::OverBudget).
     pub max_image_bytes: usize,
     /// The largest number of chunks the walk will materialize into segments and per-type stats.
     ///
@@ -778,8 +790,10 @@ fn fits_decode_budget(header: &ihdr::Ihdr, max_image_bytes: usize) -> bool {
 ///
 /// DEFLATE's ceiling is about 1032:1, so a stream at this ratio is either a large flat image or a
 /// bomb — and above [`DEFAULT_MAX_IMAGE_BYTES`] the walk stops assuming the former. A flat 16k×16k
-/// image is the one real file this declines, and it is declined as the reader's budget
-/// ([`SkippedFilterScan::OverBudget`]), not as damage.
+/// image is the one real file this declines, and it is declined as this reader's unwillingness to
+/// spend ([`SkippedFilterScan::ImplausibleInflation`]), not as damage — and not as
+/// [`OverBudget`](SkippedFilterScan::OverBudget) either, since its image fits the budget that
+/// admitted it.
 ///
 /// What a small hostile file can still cost, numerically: inside the default budget the ratio
 /// does not apply, so a few-kilobyte stream declaring an image that just fits 64 MiB is inflated
@@ -829,7 +843,7 @@ fn scan_filters(
     if !fits_decode_budget(header, DEFAULT_MAX_IMAGE_BYTES)
         && !fits_inflation_ratio(filtered_len, idat.len())
     {
-        return FilterScan::Skipped(SkippedFilterScan::OverBudget);
+        return FilterScan::Skipped(SkippedFilterScan::ImplausibleInflation);
     }
     let Ok(stream) = inflate::inflate_zlib(idat, filtered_len) else {
         return FilterScan::Skipped(SkippedFilterScan::CorruptStream);
@@ -951,10 +965,17 @@ mod tests {
     }
 
     #[test]
-    fn only_an_over_budget_scan_is_not_damage() {
+    fn only_a_refusal_to_read_is_not_damage() {
         // The single source of truth for `is_intact`'s filter conjunct: declining to inflate a
-        // stream is a statement about this reader's budget, everything else about the file.
-        assert!(!SkippedFilterScan::OverBudget.is_damage());
+        // stream is a statement about what this reader will spend, everything else about the
+        // file. Both refusals decline, for different reasons, and neither is damage.
+        for reason in [
+            SkippedFilterScan::OverBudget,
+            SkippedFilterScan::ImplausibleInflation,
+        ] {
+            assert!(!reason.is_damage(), "{reason:?}");
+            assert!(!FilterScan::Skipped(reason).is_damage(), "{reason:?}");
+        }
         for reason in [
             SkippedFilterScan::CorruptStream,
             SkippedFilterScan::LengthMismatch,
@@ -963,7 +984,6 @@ mod tests {
             assert!(reason.is_damage(), "{reason:?}");
             assert!(FilterScan::Skipped(reason).is_damage(), "{reason:?}");
         }
-        assert!(!FilterScan::Skipped(SkippedFilterScan::OverBudget).is_damage());
         let counted = FilterScan::Counted(FilterHistogram {
             counts: [1, 0, 0, 0, 0],
         });
@@ -994,6 +1014,7 @@ mod tests {
         assert_eq!(SkippedFilterScan::CorruptStream as u8, 1);
         assert_eq!(SkippedFilterScan::LengthMismatch as u8, 2);
         assert_eq!(SkippedFilterScan::UndefinedFilterCode as u8, 3);
+        assert_eq!(SkippedFilterScan::ImplausibleInflation as u8, 4);
     }
 
     #[test]
@@ -1021,15 +1042,20 @@ mod tests {
         // to `inflate_zlib` as the cap and a zlib bomb of zeros fills it from about a megabyte
         // of input. The stream here is tiny, so without the ratio bound the walk inflates it
         // completely and reports the *file's* `LengthMismatch`; with it, the walk reports its own
-        // `OverBudget` and never inflates — the reason is the discriminator.
+        // `ImplausibleInflation` and never inflates — the reason is the discriminator.
         let bomb = png_declaring(16384, 16384, 4096);
         let generous = DeconstructLimits::default().with_max_image_bytes(1 << 30);
         let report = deconstruct_with_limits(&bomb, generous).expect("deconstruct");
         assert_eq!(
+            report.native_bytes(),
+            Some(1 << 30),
+            "precondition: the declared image is exactly the budget, so it is not over it"
+        );
+        assert_eq!(
             report.filters,
-            FilterScan::Skipped(SkippedFilterScan::OverBudget),
-            "a stream that would inflate to a gigabyte from four kilobytes is the reader's \
-             budget, not the file's damage"
+            FilterScan::Skipped(SkippedFilterScan::ImplausibleInflation),
+            "a stream that would inflate to a gigabyte from four kilobytes is refused for its \
+             ratio, not for exceeding a budget it exactly meets"
         );
         assert_eq!(
             report.filtered_len,

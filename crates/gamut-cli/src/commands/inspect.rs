@@ -32,7 +32,9 @@
 //! unread. That gigabyte bounds the *image*, not what a small file may inflate to: past the
 //! decoder's default budget the walk also refuses, before inflating, a stream that would grow to
 //! more than sixty-four times its own length, so a megabyte declaring a 16k×16k header over a zlib
-//! stream of zeros is reported as not verified (over budget), never inflated to a gigabyte.
+//! stream of zeros is reported as not verified — for the stream's implausible inflation, which is
+//! a distinct reason from the image being over budget, since that image is exactly the gigabyte
+//! this command admits — and never inflated to a gigabyte.
 //!
 //! The gate is therefore **asymmetric across formats, and deliberately so**. A TIFF or DNG walk
 //! reads directories and tags, never pixel data, so there is no step in it this reader can decline
@@ -589,6 +591,9 @@ fn filter_skip_label(reason: gamut::png::SkippedFilterScan) -> &'static str {
     use gamut::png::SkippedFilterScan as Reason;
     match reason {
         Reason::OverBudget => "the image is larger than the reader's byte budget",
+        Reason::ImplausibleInflation => {
+            "the IDAT stream is too short to plausibly inflate to the image the header declares"
+        }
         Reason::CorruptStream => "the IDAT stream is corrupt or truncated",
         Reason::LengthMismatch => "the IDAT stream inflated to the wrong length",
         Reason::UndefinedFilterCode => "a scanline carries an undefined filter code",
