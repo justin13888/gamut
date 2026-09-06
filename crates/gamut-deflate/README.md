@@ -32,14 +32,15 @@ Output size in bytes (zlib streams; lower is better), reproduced by `cargo bench
 
 | input                         |    raw | `Level::Best` | `zlib -9` | `miniz_oxide`-10 | `zopfli` |
 | ----------------------------- | -----: | ------------: | --------: | ---------------: | -------: |
-| RFC 1951 spec text (36 KB)    | 36 945 |    **10 767** |    11 112 |           11 130 |   10 544 |
+| RFC 1951 spec text (36 KB)    | 36 945 |    **10 664** |    11 112 |           11 130 |   10 544 |
 | English text ×300             | 13 500 |       **103** |       110 |              107 |      103 |
-| Rust source (`lz77.rs`)       | 13 321 |     **4 362** |     4 461 |            4 470 |    4 320 |
+| Rust source (`lz77.rs`)       | 30 610 |     **9 521** |     9 854 |            9 856 |    9 459 |
 | pseudo-random (~incompressible)| 20 000 |     **2 236** |     2 290 |            2 291 |    2 122 |
 
-`Level::Best` lands ~1–7% below `zlib -9`; `zopfli` (15 optimization passes + package-merge
-length-limiting, vs. this crate's default 6 passes + a count-floor heuristic) is a few percent
-smaller again at a much higher cost. The pass budget is configurable via
+`Level::Best` lands ~2–7% below `zlib -9` and within ~1% of `zopfli` on real text and source, now
+that the optimal parse prices each match length at its own nearest distance (zopfli's `sublen`)
+rather than at the longest match's; what remains of the gap is `zopfli`'s 15 optimization passes +
+package-merge length-limiting, vs. this crate's default 6 passes + a count-floor heuristic. The pass budget is configurable via
 `DeflateEncoder::with_effort` (0 = the lazy seed parse only; 15 ≈ zopfli's budget), so size-vs-time
 curves can be swept along one axis. `DeflateEncoder::with_optimal_parse_limit` is the second axis:
 the optimal parse works in spans of at most 1 MiB by default, each with its own refined cost model
