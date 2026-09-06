@@ -181,20 +181,31 @@ fn written_top_level_boxes_are_fully_accounted() {
 
 #[test]
 fn push_top_level_box_appends_within_the_position_group() {
-    // The #444 path: a parsed model already carries a trailing box; pushing a C2PA uuid box must
-    // land in the AfterFtyp group (before the trailing box), never interleaved — and the result
-    // still round-trips byte-identically.
-    let trailing = image(vec![av01_item(1, vec![1, 2, 3, 4])]).with_top_level_boxes(vec![
-        TopLevelBox::new(*b"free", vec![0xAA]).with_position(TopLevelPosition::Trailing),
+    // The #444 path: a parsed model already carries boxes at both positions; every push must land
+    // at the END of its own position group — after the last AfterFtyp box (not at index 0), or
+    // after the last Trailing box — so the list never interleaves. Boxes are told apart by their
+    // one-byte payload. (That such a grouped list round-trips is pinned by
+    // `boxes_keep_model_order_within_each_position` and `tests/roundtrip.rs`, not here.)
+    let start = image(vec![av01_item(1, vec![1, 2, 3, 4])]).with_top_level_boxes(vec![
+        TopLevelBox::uuid(C2PA_UUID, vec![1]),
+        TopLevelBox::new(*b"free", vec![2]).with_position(TopLevelPosition::Trailing),
     ]);
-    let mut model = read(&write(&trailing).unwrap()).unwrap();
-    model.push_top_level_box(TopLevelBox::uuid(C2PA_UUID, b"store".to_vec()));
-    model.push_top_level_box(
-        TopLevelBox::new(*b"skip", vec![0xBB]).with_position(TopLevelPosition::Trailing),
-    );
+    let mut model = read(&write(&start).unwrap()).unwrap();
+    let order = |m: &IsoBmffImage| -> Vec<(u8, TopLevelPosition)> {
+        m.top_level_boxes
+            .iter()
+            .map(|b| (b.payload[0], b.position))
+            .collect()
+    };
+    let (a, t) = (TopLevelPosition::AfterFtyp, TopLevelPosition::Trailing);
 
-    let types: Vec<[u8; 4]> = model.top_level_boxes.iter().map(|b| b.ty).collect();
-    assert_eq!(types, [*b"uuid", *b"free", *b"skip"]);
-    let f = write(&model).unwrap();
-    assert_eq!(write(&read(&f).unwrap()).unwrap(), f);
+    // [a, t] + a → [a, new, t]: after the last AfterFtyp box, not at index 0.
+    model.push_top_level_box(TopLevelBox::new(*b"skip", vec![3]));
+    assert_eq!(order(&model), [(1, a), (3, a), (2, t)]);
+    // [a, a, t] + t → [a, a, t, new]: at the very end.
+    model.push_top_level_box(TopLevelBox::new(*b"skip", vec![4]).with_position(t));
+    assert_eq!(order(&model), [(1, a), (3, a), (2, t), (4, t)]);
+    // [a, a, t, t] + a → [a, a, new, t, t].
+    model.push_top_level_box(TopLevelBox::new(*b"free", vec![5]));
+    assert_eq!(order(&model), [(1, a), (3, a), (5, a), (2, t), (4, t)]);
 }
