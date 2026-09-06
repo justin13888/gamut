@@ -483,7 +483,8 @@ impl PngEncoder {
     /// size. [`with_transparent_cleanup`](Self::with_transparent_cleanup) therefore means "clean
     /// where it pays", and enabling it can never cost bytes.
     ///
-    /// A tie keeps the cleaned encoding, which carries less unseen data.
+    /// A tie keeps the *plain* encoding: cleaning is only worth its rewritten samples for a
+    /// size win, so where there is none the byte-exact candidate stands. See [`prefers_plain`].
     fn cleaned_or_plain(
         &self,
         cleaned: impl FnOnce(&mut Vec<u8>) -> Result<usize>,
@@ -841,12 +842,15 @@ impl PngEncoder {
 
 /// Whether the uncleaned encoding beats the cleaned one, for [`PngEncoder::cleaned_or_plain`].
 ///
-/// **A tie keeps the cleaned encoding**, which carries less unseen data for the same bytes. Split
-/// out for the same reason as [`prefers_native`]: engineering two encodings of the same image to
-/// land on exactly equal lengths is not something a fixture can do reliably, so the tie is only
-/// assertable here.
+/// **A tie keeps the plain encoding.** Every other reduction in this crate is byte-exact;
+/// [`with_transparent_cleanup`](PngEncoder::with_transparent_cleanup) is the one knob that alters
+/// stored samples, and it is opt-in *for a size win*. Where there is no size win there is nothing
+/// to trade the exactness for, so the candidate that changed no sample is kept. Split out for the
+/// same reason as [`prefers_native`]: engineering two encodings of the same image to land on
+/// exactly equal lengths is not something a fixture can do reliably, so the tie is only assertable
+/// here.
 fn prefers_plain(plain_len: usize, cleaned_len: usize) -> bool {
-    plain_len < cleaned_len
+    plain_len <= cleaned_len
 }
 
 /// Whether the chunk-free reduction beats the chunk-carrying one, the first step of
@@ -1206,10 +1210,13 @@ mod tests {
     }
 
     #[test]
-    fn a_tie_between_cleaned_and_plain_keeps_the_cleaned_encoding() {
+    fn a_tie_between_cleaned_and_plain_keeps_the_plain_encoding() {
         assert!(prefers_plain(10, 11), "smaller plain wins");
         assert!(!prefers_plain(11, 10), "smaller cleaned wins");
-        assert!(!prefers_plain(10, 10), "a tie keeps the cleaned encoding");
+        assert!(
+            prefers_plain(10, 10),
+            "a tie keeps the plain encoding, which altered no stored sample"
+        );
     }
 
     #[test]
