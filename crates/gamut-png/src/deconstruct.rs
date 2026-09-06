@@ -557,6 +557,10 @@ pub struct DeconstructLimits {
     /// unbounded heap, at roughly an order of magnitude over the file size. The chunk *type* is
     /// four unvalidated bytes, so the distinct-type count is attacker-chosen too.
     ///
+    /// Counted over chunks, **IHDR included**: `with_max_chunks(N)` admits a file of exactly N
+    /// chunks and refuses one of N + 1, and `with_max_chunks(0)` admits no file at all, since
+    /// every datastream this walk reports on opens with IHDR.
+    ///
     /// The default admits any plausible real file — a PNG at the ceiling is at least 12 MiB of
     /// pure chunk framing — while bounding a crafted one.
     pub max_chunks: usize,
@@ -631,7 +635,13 @@ pub fn deconstruct_with_limits(png: &[u8], limits: DeconstructLimits) -> Result<
     let mut tally = ChunkTally::new();
     let mut idat = Vec::new();
     let mut saw_iend = false;
-    let push = |segments: &mut Vec<Segment>, tally: &mut ChunkTally, chunk: &RawChunk| {
+    // Every chunk enters the report here, IHDR included, so the ceiling is checked here too: a
+    // check placed only inside the loop below would let the chunk pushed before it through, and
+    // `with_max_chunks(N)` would admit N + 1.
+    let push = |segments: &mut Vec<Segment>,
+                tally: &mut ChunkTally,
+                chunk: &RawChunk|
+     -> Result<()> {
         segments.push(Segment {
             range: chunk.range.clone(),
             kind: SegmentKind::Chunk {
@@ -641,8 +651,18 @@ pub fn deconstruct_with_limits(png: &[u8], limits: DeconstructLimits) -> Result<
             },
         });
         tally.record(chunk.chunk_type, chunk.data.len());
+        // The signature segment is not a chunk, so the ceiling is over one fewer than the
+        // segments materialized so far. Nothing but a chunk has been pushed at this point:
+        // `Truncated` and `Trailer` end the walk.
+        if segments.len() - 1 > limits.max_chunks {
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "PNG: more chunks than the walk's ceiling admits",
+            ));
+        }
+        Ok(())
     };
-    push(&mut segments, &mut tally, &first);
+    push(&mut segments, &mut tally, &first)?;
 
     loop {
         match reader.next_chunk() {
@@ -652,16 +672,7 @@ pub fn deconstruct_with_limits(png: &[u8], limits: DeconstructLimits) -> Result<
                     idat.extend_from_slice(chunk.data);
                 }
                 let is_iend = &chunk.chunk_type == b"IEND";
-                push(&mut segments, &mut tally, &chunk);
-                // The signature segment is not a chunk, so the ceiling is over one fewer than
-                // the segments materialized so far.
-                let chunks_so_far = segments.len() - 1;
-                if chunks_so_far > limits.max_chunks {
-                    return Err(Error::invalid_input(
-                        env!("CARGO_PKG_NAME"),
-                        "PNG: more chunks than the walk's ceiling admits",
-                    ));
-                }
+                push(&mut segments, &mut tally, &chunk)?;
                 if is_iend {
                     saw_iend = true;
                     break;
