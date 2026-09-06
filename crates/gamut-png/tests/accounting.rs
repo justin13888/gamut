@@ -586,8 +586,9 @@ fn the_chunk_ceiling_admits_exactly_its_own_count_and_refuses_one_more() {
     // rest, so a ceiling checked only inside that loop let it through and `with_max_chunks(N)`
     // meant N + 1 in that one respect — visibly so at zero, which admitted a whole file.
     let ihdr_only = common::png_from_chunks(&chunks[..1]);
-    let report = deconstruct_with_limits(&ihdr_only, DeconstructLimits::default().with_max_chunks(1))
-        .expect("one chunk under a ceiling of one");
+    let report =
+        deconstruct_with_limits(&ihdr_only, DeconstructLimits::default().with_max_chunks(1))
+            .expect("one chunk under a ceiling of one");
     assert_eq!(report.chunks.len(), 1, "IHDR alone, and it is a chunk");
     let err = deconstruct_with_limits(&ihdr_only, DeconstructLimits::default().with_max_chunks(0))
         .expect_err("no chunk at all fits a ceiling of zero");

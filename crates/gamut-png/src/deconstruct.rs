@@ -638,30 +638,28 @@ pub fn deconstruct_with_limits(png: &[u8], limits: DeconstructLimits) -> Result<
     // Every chunk enters the report here, IHDR included, so the ceiling is checked here too: a
     // check placed only inside the loop below would let the chunk pushed before it through, and
     // `with_max_chunks(N)` would admit N + 1.
-    let push = |segments: &mut Vec<Segment>,
-                tally: &mut ChunkTally,
-                chunk: &RawChunk|
-     -> Result<()> {
-        segments.push(Segment {
-            range: chunk.range.clone(),
-            kind: SegmentKind::Chunk {
-                chunk_type: chunk.chunk_type,
-                payload_len: chunk.data.len(),
-                crc_ok: chunk.crc_ok,
-            },
-        });
-        tally.record(chunk.chunk_type, chunk.data.len());
-        // The signature segment is not a chunk, so the ceiling is over one fewer than the
-        // segments materialized so far. Nothing but a chunk has been pushed at this point:
-        // `Truncated` and `Trailer` end the walk.
-        if segments.len() - 1 > limits.max_chunks {
-            return Err(Error::invalid_input(
-                env!("CARGO_PKG_NAME"),
-                "PNG: more chunks than the walk's ceiling admits",
-            ));
-        }
-        Ok(())
-    };
+    let push =
+        |segments: &mut Vec<Segment>, tally: &mut ChunkTally, chunk: &RawChunk| -> Result<()> {
+            segments.push(Segment {
+                range: chunk.range.clone(),
+                kind: SegmentKind::Chunk {
+                    chunk_type: chunk.chunk_type,
+                    payload_len: chunk.data.len(),
+                    crc_ok: chunk.crc_ok,
+                },
+            });
+            tally.record(chunk.chunk_type, chunk.data.len());
+            // The signature segment is not a chunk, so the ceiling is over one fewer than the
+            // segments materialized so far. Nothing but a chunk has been pushed at this point:
+            // `Truncated` and `Trailer` end the walk.
+            if segments.len() - 1 > limits.max_chunks {
+                return Err(Error::invalid_input(
+                    env!("CARGO_PKG_NAME"),
+                    "PNG: more chunks than the walk's ceiling admits",
+                ));
+            }
+            Ok(())
+        };
     push(&mut segments, &mut tally, &first)?;
 
     loop {
