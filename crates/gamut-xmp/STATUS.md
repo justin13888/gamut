@@ -30,6 +30,21 @@ placement, and array/struct nesting so output is stable, diffable, and round-tri
   the namespace only — what the property *means* is read by `gamut-metadata`, consistent with the
   registry-not-validator posture below — and `tests/oracle.rs` pins that XMPCore reads the property
   back under the `Xmp.dcterms.provenance` key its own registry defines.
+- **Schema breadth = exiv2's documented set (issue #421).** `WellKnownNs` holds 30 entries: the
+  Adobe Parts 1–2 schemas and structure types, `dcterms`, and the twelve further schemas exiv2
+  documents (<https://exiv2.org/metadata.html>): `exifEX`, `aux`, `plus`, `mwg-rs`, `mwg-kw`,
+  `GPano`, `lr`, `MicrosoftPhoto`, `digiKam`, `acdsee`, `crss`, `dwc`. Each URI is taken from the
+  schema owner's specification where one is published and cited on the variant; the vendored
+  reference for all twelve is exiv2's own registry (`third_party/exiv2/src/properties.cpp`,
+  `xmpNsInfo`), and `tests/oracle.rs` reads a documented property of each back from XMPCore by its
+  `Xmp.<prefix>.<name>` key, which fails for a wrong URI *or* a wrong prefix. The registry stays a
+  registry: nothing about a value is interpreted. Two divergences are recorded rather than hidden:
+  `exifEX` is `http://cipa.jp/exif/1.0/` (CIPA DC-010; the reference engine's URI) although the
+  vendored Exif 3.0 text's annotation examples (Annex J) bind the prefix to `…/exif/2.32/`; and
+  exiv2 appends `/` to a URI ending in neither `/` nor `#` when registering it with XMPCore
+  (`XmpProperties::registerNs`), so the engine re-serializes `dwc` as `…/index.htm/` while gamut
+  writes the `…/index.htm` exiv2 documents — pinned in `tests/oracle.rs` as an oracle
+  normalization.
 
 ## Phases
 
@@ -42,6 +57,7 @@ placement, and array/struct nesting so output is stable, diffable, and round-tri
 | P5 | Part 1 §7 | **Keystone** — canonical RDF/XML serialization + packet emit (writable padding) | ✅ done |
 | P6 | — | exiv2 differential conformance gate | ✅ done |
 | P7 | Parts 1–3 | **v1 stabilization** (issue #189) — API finalization (`XmpPacket::parse` composition, `XmpWriter::with_namespace` prefix registration, model conveniences), conformance audit (control-character escaping fix, trailer `end=` matching, edge-case pins), gamut-iptc dogfood migration, docs | ✅ done |
+| P8 | Part 2 | **Breadth** (issue #421) — registry at parity with exiv2's documented schemas (17 → 30 entries), per-schema oracle tests | ✅ done |
 
 ## Intentional skips (audited for v1)
 
@@ -61,6 +77,6 @@ deliberately:
 - **Part 3 per-container embedding and JPEG ExtendedXMP:** owned by the format crates; this crate
   supplies wrapper-optional parse, bare-body serialization, and the writable/padding envelope.
 - **Per-schema value validation (Part 2):** values are uninterpreted text; `WellKnownNs` is a
-  namespace registry, not a validator.
+  namespace registry, not a validator — still true after the exiv2-parity additions (issue #421).
 - **Deferred additive API** (post-1.0, no consumer today): an opt-in `XmpMeta::validate()`, and
   nested-structure field lookup.

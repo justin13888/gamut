@@ -80,6 +80,25 @@ fn empty_packet_round_trips_through_exiv2() {
     exiv2_oracle::validate(&packet).expect("exiv2 must accept an empty packet");
 }
 
+/// The URI under which the reference engine re-serializes a schema.
+///
+/// An oracle limitation, pinned rather than hidden: exiv2 normalizes every namespace URI it
+/// registers with XMPCore by appending `/` when the URI ends in neither `/` nor `#`
+/// (`third_party/exiv2/src/properties.cpp`, `XmpProperties::registerNs` and
+/// `XmpProperties::prefix`, "`if (ns2.back() != '/' && ns2.back() != '#') ns2 += '/'`"). Reading
+/// is unaffected — the key lookup resolves through the same normalization, so a `dwc` property
+/// reads back by its `Xmp.dwc.*` key — but XMPCore's output then declares the normalized URI.
+/// Darwin Core (`http://rs.tdwg.org/dwc/index.htm`) is the only registered schema this touches;
+/// gamut writes the URI exactly as exiv2 documents and registers it (`xmp.cpp:519`).
+fn xmpcore_output_uri(ns: WellKnownNs) -> String {
+    let uri = ns.uri();
+    if uri.ends_with('/') || uri.ends_with('#') {
+        uri.to_owned()
+    } else {
+        format!("{uri}/")
+    }
+}
+
 #[test]
 fn every_well_known_namespace_survives_xmpcore() {
     // One property in each WellKnownNs, its value naming the expected prefix. XMPCore's own
@@ -100,8 +119,9 @@ fn every_well_known_namespace_survives_xmpcore() {
     let out = exiv2_oracle::roundtrip(&packet).expect("exiv2 round-trip");
     let parsed = XmpMeta::from_packet(&out).expect("gamut parses exiv2's output");
     for ns in WellKnownNs::ALL {
+        // `xmpcore_output_uri` is the identity for every schema but Darwin Core (see its doc).
         assert_eq!(
-            parsed.get_text(ns.uri(), "GamutCheck"),
+            parsed.get_text(&xmpcore_output_uri(*ns), "GamutCheck"),
             Some(ns.prefix()),
             "property in {ns:?} must survive the reference engine"
         );
@@ -201,4 +221,250 @@ fn default_xml_lang_on_description_matches_reference() {
         reference.get(DC, "coverage").and_then(XmpProperty::lang),
         Some("de")
     );
+}
+
+// ---------------------------------------------------------------------------------------------------
+// Schema breadth (issue #421): one test per namespace added for exiv2 parity.
+//
+// Each writes one *documented* property of the schema (a name from exiv2's own property table for
+// that namespace) and reads it back from XMPCore by its exiv2 key, `Xmp.<prefix>.<name>`. The key
+// is what makes this differential rather than self-consistent: exiv2 resolves the key's prefix
+// through its registry, so a URI XMPCore does not know, or a prefix that is not the one exiv2
+// binds to that URI, fails the lookup — the unit test in `namespace.rs` can only compare the
+// strings with themselves.
+// ---------------------------------------------------------------------------------------------------
+
+/// Serializes `meta`, asserts XMPCore accepts it, and returns the packet.
+fn packet_xmpcore_accepts(meta: &XmpMeta) -> Vec<u8> {
+    let packet = meta.to_packet();
+    exiv2_oracle::validate(&packet).expect("exiv2 (Adobe XMPCore) must accept gamut's packet");
+    packet
+}
+
+/// A graph holding one simple text property in `ns`.
+fn one_text(ns: WellKnownNs, name: &str, value: &str) -> XmpMeta {
+    let mut meta = XmpMeta::new();
+    meta.set_text(ns.uri(), name, value);
+    meta
+}
+
+/// Asserts a simple text property in `ns` is keyed `Xmp.<prefix>.<name>` by XMPCore and survives
+/// its re-serialization back into gamut.
+fn text_property_survives_xmpcore(ns: WellKnownNs, name: &str, value: &str) {
+    let packet = packet_xmpcore_accepts(&one_text(ns, name, value));
+    let key = format!("Xmp.{}.{name}", ns.prefix());
+    assert_eq!(
+        exiv2_oracle::get_property(&packet, &key).unwrap(),
+        value,
+        "{key} must read back from the reference engine"
+    );
+    let out = exiv2_oracle::roundtrip(&packet).expect("exiv2 round-trip");
+    let parsed = XmpMeta::from_packet(&out).expect("gamut parses exiv2's output");
+    assert_eq!(parsed.get_text(ns.uri(), name), Some(value));
+}
+
+#[test]
+fn exif_ex_lens_model_reads_back_under_the_exif_ex_key() {
+    text_property_survives_xmpcore(WellKnownNs::ExifEx, "LensModel", "GAMUT 50mm F1.4");
+}
+
+#[test]
+fn aux_lens_reads_back_under_the_aux_key() {
+    text_property_survives_xmpcore(WellKnownNs::Aux, "Lens", "50.0 mm f/1.4");
+}
+
+#[test]
+fn plus_version_reads_back_under_the_plus_key() {
+    text_property_survives_xmpcore(WellKnownNs::Plus, "Version", "1.2.0");
+}
+
+#[test]
+fn gpano_projection_type_reads_back_under_the_gpano_key() {
+    text_property_survives_xmpcore(WellKnownNs::GPano, "ProjectionType", "equirectangular");
+}
+
+#[test]
+fn microsoft_photo_rating_reads_back_under_the_microsoft_photo_key() {
+    text_property_survives_xmpcore(WellKnownNs::MicrosoftPhoto, "Rating", "75");
+}
+
+#[test]
+fn digikam_color_label_reads_back_under_the_digikam_key() {
+    text_property_survives_xmpcore(WellKnownNs::DigiKam, "ColorLabel", "3");
+}
+
+#[test]
+fn acdsee_caption_reads_back_under_the_acdsee_key() {
+    text_property_survives_xmpcore(WellKnownNs::Acdsee, "caption", "Harbour at dusk");
+}
+
+#[test]
+fn lightroom_hierarchical_subject_reads_back_under_the_lr_key() {
+    // `lr:hierarchicalSubject` is the property the schema exists for: a Bag of `|`-separated
+    // keyword paths.
+    let lr = WellKnownNs::Lightroom;
+    let mut meta = XmpMeta::new();
+    meta.set(XmpProperty::new(
+        lr.uri(),
+        "hierarchicalSubject",
+        XmpValue::Array(XmpArray::Bag(vec![XmpItem::new(XmpValue::Simple(
+            "Places|Seoul".into(),
+        ))])),
+    ));
+    let packet = packet_xmpcore_accepts(&meta);
+    assert_eq!(
+        exiv2_oracle::get_property(&packet, "Xmp.lr.hierarchicalSubject").unwrap(),
+        "Places|Seoul"
+    );
+    let out = exiv2_oracle::roundtrip(&packet).expect("exiv2 round-trip");
+    let parsed = XmpMeta::from_packet(&out).expect("gamut parses exiv2's output");
+    let XmpValue::Array(XmpArray::Bag(items)) =
+        &parsed.get(lr.uri(), "hierarchicalSubject").unwrap().value
+    else {
+        panic!("lr:hierarchicalSubject must round-trip as a Bag");
+    };
+    let values: Vec<&str> = items.iter().filter_map(XmpItem::text).collect();
+    assert_eq!(values, ["Places|Seoul"]);
+}
+
+/// A graph whose one property in `ns` is the structure `name` holding the text fields `fields`
+/// (same namespace) — the shape of the four schemas whose top-level properties are all structures.
+fn one_struct(ns: WellKnownNs, name: &str, fields: &[(&str, &str)]) -> XmpMeta {
+    let mut meta = XmpMeta::new();
+    meta.set(XmpProperty::new(
+        ns.uri(),
+        name,
+        XmpValue::Structured(
+            fields
+                .iter()
+                .map(|(field, value)| {
+                    XmpProperty::new(ns.uri(), *field, XmpValue::Simple((*value).into()))
+                })
+                .collect(),
+        ),
+    ));
+    meta
+}
+
+/// Asserts the structure field `Xmp.<prefix>.<name>/<prefix>:<field>` reads back from XMPCore and
+/// survives its re-serialization.
+fn struct_field_survives_xmpcore(ns: WellKnownNs, name: &str, field: &str, value: &str) {
+    let packet = packet_xmpcore_accepts(&one_struct(ns, name, &[(field, value)]));
+    let prefix = ns.prefix();
+    let key = format!("Xmp.{prefix}.{name}/{prefix}:{field}");
+    assert_eq!(
+        exiv2_oracle::get_property(&packet, &key).unwrap(),
+        value,
+        "{key} must read back from the reference engine"
+    );
+    let out = exiv2_oracle::roundtrip(&packet).expect("exiv2 round-trip");
+    let parsed = XmpMeta::from_packet(&out).expect("gamut parses exiv2's output");
+    // The reference engine's output URI (differs from `ns.uri()` only for Darwin Core).
+    let out_uri = xmpcore_output_uri(ns);
+    let XmpValue::Structured(fields) = &parsed.get(&out_uri, name).unwrap().value else {
+        panic!("{prefix}:{name} must round-trip as a structure");
+    };
+    let got = fields
+        .iter()
+        .find(|f| f.namespace == out_uri && f.name == field)
+        .and_then(XmpProperty::text);
+    assert_eq!(got, Some(value));
+}
+
+/// Asserts the MWG shape — a top-level structure `name` whose field `list` is a Bag of structures
+/// each carrying the text `field` — reads back from XMPCore as
+/// `Xmp.<prefix>.<name>/<prefix>:<list>[1]/<prefix>:<field>` and survives its re-serialization.
+fn struct_bag_item_field_survives_xmpcore(
+    ns: WellKnownNs,
+    name: &str,
+    list: &str,
+    field: &str,
+    value: &str,
+) {
+    let uri = ns.uri();
+    let item = XmpItem::new(XmpValue::Structured(vec![XmpProperty::new(
+        uri,
+        field,
+        XmpValue::Simple(value.into()),
+    )]));
+    let mut meta = XmpMeta::new();
+    meta.set(XmpProperty::new(
+        uri,
+        name,
+        XmpValue::Structured(vec![XmpProperty::new(
+            uri,
+            list,
+            XmpValue::Array(XmpArray::Bag(vec![item])),
+        )]),
+    ));
+    let packet = packet_xmpcore_accepts(&meta);
+    let prefix = ns.prefix();
+    let key = format!("Xmp.{prefix}.{name}/{prefix}:{list}[1]/{prefix}:{field}");
+    assert_eq!(
+        exiv2_oracle::get_property(&packet, &key).unwrap(),
+        value,
+        "{key} must read back from the reference engine"
+    );
+    let out = exiv2_oracle::roundtrip(&packet).expect("exiv2 round-trip");
+    let parsed = XmpMeta::from_packet(&out).expect("gamut parses exiv2's output");
+    assert_eq!(
+        parsed.get(uri, name),
+        meta.get(uri, name),
+        "{prefix}:{name} must round-trip through XMPCore unchanged"
+    );
+}
+
+#[test]
+fn mwg_regions_list_item_name_reads_back_under_the_mwg_rs_key() {
+    // MWG Guidelines 2.0, Regions: `mwg-rs:Regions` is a RegionInfo structure whose `RegionList`
+    // is a Bag of RegionStruct, each with a text `Name`. A hyphenated prefix is also the one
+    // shape the writer's prefix table had not exercised before.
+    struct_bag_item_field_survives_xmpcore(
+        WellKnownNs::MwgRegions,
+        "Regions",
+        "RegionList",
+        "Name",
+        "Face 1",
+    );
+}
+
+#[test]
+fn mwg_keywords_hierarchy_item_keyword_reads_back_under_the_mwg_kw_key() {
+    // MWG Guidelines 2.0, Keywords: `mwg-kw:Keywords` is a KeywordInfo structure whose
+    // `Hierarchy` is a Bag of KeywordStruct, each with a text `Keyword`.
+    struct_bag_item_field_survives_xmpcore(
+        WellKnownNs::MwgKeywords,
+        "Keywords",
+        "Hierarchy",
+        "Keyword",
+        "Seoul",
+    );
+}
+
+#[test]
+fn camera_raw_saved_settings_name_reads_back_under_the_crss_key() {
+    struct_field_survives_xmpcore(
+        WellKnownNs::CameraRawSavedSettings,
+        "SavedSettings",
+        "Name",
+        "Import",
+    );
+}
+
+#[test]
+fn darwin_core_record_field_reads_back_under_the_dwc_key() {
+    // The one schema whose URI ends in neither `/` nor `#`. gamut writes it exactly as exiv2
+    // documents it; the reference engine keys it correctly (`Xmp.dwc.*` below) and re-serializes
+    // it with a `/` appended (`xmpcore_output_uri`) — an oracle normalization, not a defect in
+    // either direction, so both halves are pinned here.
+    let dwc = WellKnownNs::DarwinCore;
+    let packet = one_struct(dwc, "Record", &[("institutionID", "GAMUT")]).to_packet();
+    assert!(
+        std::str::from_utf8(&packet)
+            .unwrap()
+            .contains("xmlns:dwc=\"http://rs.tdwg.org/dwc/index.htm\""),
+        "gamut must declare the URI exiv2 documents, unslashed"
+    );
+    assert_eq!(xmpcore_output_uri(dwc), "http://rs.tdwg.org/dwc/index.htm/");
+    struct_field_survives_xmpcore(dwc, "Record", "institutionID", "GAMUT");
 }

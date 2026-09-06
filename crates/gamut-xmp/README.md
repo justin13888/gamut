@@ -72,10 +72,17 @@ padding) and `XmpPacket::parse` the graph — `from_packet` is exactly that comp
   with the reference engine. Per-property and per-item `xml:lang` are fully supported.
 - **Part 2 (standard schemas) is a namespace registry** (`WellKnownNs`), not per-property
   validation: values are uninterpreted text in the model, as the wire format allows. The registry
-  also carries the external schemas image-metadata standards layer on XMP — `dcterms` (DCMI
-  Metadata Terms), which C2PA uses for `dcterms:provenance`, the URL of an *external* manifest
-  store (C2PA 2.4 §11.5). gamut-xmp registers the namespace; reading that property as a
-  provenance signal is [`gamut-metadata`](../gamut-metadata)'s job.
+  covers every schema exiv2 documents (<https://exiv2.org/metadata.html>) — the Adobe Parts 1–2
+  schemas plus the external ones image-metadata standards and deployed tools layer on XMP:
+  `dcterms` (DCMI Metadata Terms, which C2PA uses for `dcterms:provenance`, the URL of an
+  *external* manifest store — C2PA 2.4 §11.5; reading that property as a provenance signal is
+  [`gamut-metadata`](../gamut-metadata)'s job), `exifEX`, `aux`, `plus`, `mwg-rs`, `mwg-kw`,
+  `GPano`, `lr`, `MicrosoftPhoto`, `digiKam`, `acdsee`, `crss` and `dwc`. Registering a schema
+  fixes the prefix its properties serialize under — the one Adobe XMPCore keys them by — and
+  nothing more; each non-Adobe URI is cited on its variant, and every one is vouched for by the
+  reference engine in `tests/oracle.rs`. `exifEX` is registered under `http://cipa.jp/exif/1.0/`
+  (CIPA DC-010, the URI the reference engine and deployed writers use); the Exif 3.0 text's
+  annotation examples bind the same prefix to `…/exif/2.32/`, which is not registered.
 - **Part 3 (storage in files) belongs to the format crates by design.** This crate supplies what
   they need — wrapper-optional parse, bare-body serialization (`to_rdf` / `serialize_body`), and
   the writability/padding envelope for in-place editing. Locating packets inside JPEG/TIFF/PNG
@@ -87,8 +94,9 @@ padding) and `XmpPacket::parse` the graph — `from_packet` is exactly that comp
 ## Status
 
 **Production-ready v1** (issue #189). Implemented: parser + canonical serializer for the full XMP
-data model (simple / URI / structured / `Bag`·`Seq`·`Alt`, qualifiers, language alternatives) and
-the `<?xpacket?>` wrapper. See [STATUS.md](STATUS.md).
+data model (simple / URI / structured / `Bag`·`Seq`·`Alt`, qualifiers, language alternatives), the
+`<?xpacket?>` wrapper, and a 30-schema registry at parity with exiv2's documented set (issue
+#421). See [STATUS.md](STATUS.md).
 
 ## Migrating from 1.x
 
@@ -106,8 +114,12 @@ changed — every existing variant, URI, prefix and method keeps its meaning.
   non-semantic (`tests/roundtrip.rs`).
 - **Differential oracle** against exiv2's bundled **Adobe XMPCore**: gamut's packets validate and
   round-trip through the reference engine, every `WellKnownNs` URI is vouched for by its schema
-  registry, and the default-`xml:lang` posture is pinned to parity (`tests/oracle.rs`; needs the
-  `third_party/exiv2` + `third_party/expat` submodules and a C++ toolchain).
+  registry (one test per exiv2-parity schema reads a documented property back by its
+  `Xmp.<prefix>.<name>` key), and the default-`xml:lang` posture is pinned to parity
+  (`tests/oracle.rs`; needs the `third_party/exiv2` + `third_party/expat` submodules and a C++
+  toolchain). One oracle normalization is pinned as such: exiv2 appends `/` to a namespace URI
+  ending in neither `/` nor `#` when it registers it with XMPCore, so the engine re-serializes
+  Darwin Core as `http://rs.tdwg.org/dwc/index.htm/`; gamut writes the URI exiv2 documents.
 - **Mutation-clean** — `cargo mutants` passes with zero gamut-xmp exclusions in
   `.cargo/mutants.toml`.
 - **No benches, intentionally** — the crate has no performance contract; packets are a few KB.
