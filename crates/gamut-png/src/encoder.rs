@@ -8,7 +8,9 @@ use gamut_core::{
 };
 use gamut_deflate::{DeflateEncoder, Level};
 
-use crate::ancillary::{Ancillary, PhysicalUnit, SrgbIntent, WrittenHeader};
+use crate::ancillary::{
+    Ancillary, PaletteOrigin, PhysicalUnit, SrgbIntent, WrittenHeader, WrittenPalette,
+};
 use crate::backend::{IdatDeflater, IdatInfo, Registry, run_deflaters};
 use crate::chunk::{self, SIGNATURE};
 use crate::color::ColorType;
@@ -345,7 +347,11 @@ impl PngEncoder {
             WrittenHeader {
                 color: ColorType::Indexed,
                 bit_depth: depth,
-                plte: Some(&plte),
+                palette: Some(WrittenPalette {
+                    plte: &plte,
+                    trns,
+                    origin: PaletteOrigin::Caller,
+                }),
             },
             |out| {
                 chunk::write_chunk(out, *b"PLTE", &plte);
@@ -765,7 +771,11 @@ impl PngEncoder {
                     WrittenHeader {
                         color: ColorType::Indexed,
                         bit_depth: depth,
-                        plte: Some(&plte),
+                        palette: Some(WrittenPalette {
+                            plte: &plte,
+                            trns: trns.as_deref(),
+                            origin: PaletteOrigin::Derived,
+                        }),
                     },
                     |out| {
                         chunk::write_chunk(out, *b"PLTE", &plte);

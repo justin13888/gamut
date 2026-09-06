@@ -218,16 +218,77 @@ impl Ancillary {
     }
 }
 
-/// The IHDR — and, for an indexed image, the `PLTE` payload — the ancillary chunks are written
-/// under: what a colour-type-shaped payload has to agree with.
+/// Whose palette an indexed image is written with — which decides what a caller's palette
+/// *index* refers to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PaletteOrigin {
+    /// The caller's own palette (`encode_indexed8`): an index the caller set names one of its
+    /// entries.
+    Caller,
+    /// A palette the encoder derived from the pixels under auto-reduce, in an order the caller
+    /// never saw (transparent entries first, then by luma): an index the caller set names nothing
+    /// in it.
+    Derived,
+}
+
+/// The palette an indexed image is written with.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct WrittenPalette<'a> {
+    /// The `PLTE` payload: RGB triples.
+    pub plte: &'a [u8],
+    /// The `tRNS` payload — one alpha per leading entry, entries past its end being opaque
+    /// (§11.3.2.1) — or `None` when every entry is opaque.
+    pub trns: Option<&'a [u8]>,
+    /// Whose palette it is.
+    pub origin: PaletteOrigin,
+}
+
+impl WrittenPalette<'_> {
+    /// The number of entries.
+    fn len(self) -> usize {
+        self.plte.len() / 3
+    }
+
+    /// Entry `index`'s alpha: its `tRNS` byte, or 255 past the end of `tRNS`.
+    fn alpha(self, index: usize) -> u8 {
+        self.trns
+            .and_then(|trns| trns.get(index).copied())
+            .unwrap_or(255)
+    }
+
+    /// The index of the entry holding `rgb`, preferring an opaque one.
+    ///
+    /// A background is a colour a viewer sees, so where a triple appears both as an opaque entry
+    /// and as a transparent one — which the encoder's transparent-first ordering puts *first*,
+    /// and which transparent cleanup manufactures whenever the image has opaque black — the
+    /// opaque entry is the one meant. A triple that appears only under transparency still names
+    /// that entry: its RGB is what a compositing reader paints.
+    fn index_of(self, rgb: [u8; 3]) -> Option<usize> {
+        let matches = || {
+            self.plte
+                .as_chunks::<3>()
+                .0
+                .iter()
+                .enumerate()
+                .filter(move |(_, entry)| **entry == rgb)
+                .map(|(index, _)| index)
+        };
+        matches()
+            .find(|&index| self.alpha(index) == 255)
+            .or_else(|| matches().next())
+    }
+}
+
+/// The IHDR — and, for an indexed image, the palette — the ancillary chunks are written under:
+/// what a colour-type-shaped payload has to agree with.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct WrittenHeader<'a> {
     /// The colour type IHDR declares.
     pub color: ColorType,
     /// The bit depth IHDR declares.
     pub bit_depth: u8,
-    /// The `PLTE` payload (RGB triples) for [`ColorType::Indexed`]; `None` otherwise.
-    pub plte: Option<&'a [u8]>,
+    /// The palette for [`ColorType::Indexed`]; `None` otherwise.
+    pub palette: Option<WrittenPalette<'a>>,
 }
 
 impl WrittenHeader<'static> {
@@ -236,7 +297,7 @@ impl WrittenHeader<'static> {
         Self {
             color,
             bit_depth,
-            plte: None,
+            palette: None,
         }
     }
 }
@@ -250,10 +311,13 @@ impl WrittenHeader<'static> {
 /// - a grey sample and an RGB triple whose channels agree are the same colour, either way round;
 /// - an RGB or grey colour under a palette becomes the index of the entry holding it — which
 ///   exists whenever the background colour occurs in the image, since the palette is built from
-///   the image — and is omitted when no entry does;
-/// - a palette index names a colour only inside a palette. Under a written palette it is kept
-///   when it is in range; under any other colour type there is no palette it refers to (the one
-///   caller-supplied palette path, `encode_indexed8`, always writes indexed), so it is omitted;
+///   the image — preferring an opaque entry over a transparent twin of the same triple
+///   ([`WrittenPalette::index_of`]), and is omitted when no entry does;
+/// - a palette index names a colour only inside the palette the caller supplied. It is kept,
+///   when in range, on the `encode_indexed8` path, whose palette is the caller's; under an
+///   encoder-derived palette ([`PaletteOrigin::Derived`]) it names an entry in an order the
+///   caller never saw, and under any other colour type there is no palette at all, so in both
+///   cases it is omitted;
 /// - a grey or RGB sample must fit the written depth (`value < 1 << depth` below 16 bits); one
 ///   that does not is omitted rather than written as a chunk the reader rejects.
 ///
@@ -264,9 +328,12 @@ pub(crate) fn bkgd_for(bkgd: &[u8], written: WrittenHeader<'_>) -> Option<Vec<u8
     let sample = |hi: u8, lo: u8| u16::from_be_bytes([hi, lo]);
     let rgb: [u16; 3] = match *bkgd {
         [index] => {
-            let entries = written.plte.map_or(0, |plte| plte.len() / 3);
-            return (written.color == ColorType::Indexed && usize::from(index) < entries)
-                .then(|| vec![index]);
+            // An index names an entry only in the palette the caller supplied.
+            let palette = written.palette?;
+            return (written.color == ColorType::Indexed
+                && palette.origin == PaletteOrigin::Caller
+                && usize::from(index) < palette.len())
+            .then(|| vec![index]);
         }
         [hi, lo] => [sample(hi, lo); 3],
         [r1, r0, g1, g0, b1, b0] => [sample(r1, r0), sample(g1, g0), sample(b1, b0)],
@@ -276,12 +343,7 @@ pub(crate) fn bkgd_for(bkgd: &[u8], written: WrittenHeader<'_>) -> Option<Vec<u8
         ColorType::Indexed => {
             let entry = rgb.map(|v| u8::try_from(v).ok());
             let entry = [entry[0]?, entry[1]?, entry[2]?];
-            let index = written
-                .plte?
-                .as_chunks::<3>()
-                .0
-                .iter()
-                .position(|e| *e == entry)?;
+            let index = written.palette?.index_of(entry)?;
             u8::try_from(index).ok().map(|index| vec![index])
         }
         ColorType::Grayscale | ColorType::GrayscaleAlpha => {
@@ -380,11 +442,7 @@ mod tests {
     use super::*;
 
     /// The header the pre-existing serialisation tests were written against: 8-bit truecolour.
-    const RGB8: WrittenHeader<'static> = WrittenHeader {
-        color: ColorType::Truecolor,
-        bit_depth: 8,
-        plte: None,
-    };
+    const RGB8: WrittenHeader<'static> = WrittenHeader::new(ColorType::Truecolor, 8);
 
     fn find_chunk(png: &[u8], ty: &[u8; 4]) -> Option<Vec<u8>> {
         // Walk the chunk stream (after the 8-byte signature) and return a chunk's data.
@@ -490,31 +548,73 @@ mod tests {
     }
 
     fn header(color: ColorType, bit_depth: u8) -> WrittenHeader<'static> {
-        WrittenHeader {
-            color,
-            bit_depth,
-            plte: None,
-        }
+        WrittenHeader::new(color, bit_depth)
     }
 
     /// Three entries: red, a grey, blue.
     const PLTE: [u8; 9] = [200, 30, 60, 77, 77, 77, 20, 90, 220];
 
-    fn indexed(bit_depth: u8) -> WrittenHeader<'static> {
+    fn palette(origin: PaletteOrigin, trns: Option<&'static [u8]>) -> WrittenHeader<'static> {
         WrittenHeader {
             color: ColorType::Indexed,
+            bit_depth: 8,
+            palette: Some(WrittenPalette {
+                plte: &PLTE,
+                trns,
+                origin,
+            }),
+        }
+    }
+
+    /// The caller's own opaque palette, at index depth 8.
+    fn indexed(bit_depth: u8) -> WrittenHeader<'static> {
+        WrittenHeader {
             bit_depth,
-            plte: Some(&PLTE),
+            ..palette(PaletteOrigin::Caller, None)
         }
     }
 
     #[test]
-    fn a_background_index_survives_only_inside_a_palette_that_holds_it() {
+    fn a_background_index_survives_only_inside_the_callers_palette() {
         assert_eq!(bkgd_for(&[2], indexed(2)), Some(vec![2]));
         assert_eq!(bkgd_for(&[3], indexed(2)), None, "past the palette");
-        // The caller's index refers to no palette the file carries.
+        // An encoder-derived palette is in an order the caller never saw.
+        assert_eq!(bkgd_for(&[2], palette(PaletteOrigin::Derived, None)), None);
+        // And under any other colour type there is no palette at all.
         assert_eq!(bkgd_for(&[0], header(ColorType::TruecolorAlpha, 8)), None);
         assert_eq!(bkgd_for(&[0], header(ColorType::Grayscale, 8)), None);
+    }
+
+    #[test]
+    fn a_colour_with_a_transparent_twin_names_the_opaque_entry() {
+        // Two black entries: the transparent one first, as the encoder orders them.
+        const BLACKS: [u8; 9] = [0, 0, 0, 0, 0, 0, 20, 90, 220];
+        let twins = |trns: Option<&'static [u8]>| WrittenHeader {
+            color: ColorType::Indexed,
+            bit_depth: 8,
+            palette: Some(WrittenPalette {
+                plte: &BLACKS,
+                trns,
+                origin: PaletteOrigin::Derived,
+            }),
+        };
+        assert_eq!(
+            bkgd_for(&[0, 0, 0, 0, 0, 0], twins(Some(&[0]))),
+            Some(vec![1])
+        );
+        // Past the end of tRNS every entry is opaque, so the first match is opaque and wins.
+        assert_eq!(bkgd_for(&[0, 0, 0, 0, 0, 0], twins(None)), Some(vec![0]));
+        // A triple that exists only under transparency still names that entry: its RGB is what a
+        // compositing reader paints.
+        assert_eq!(
+            bkgd_for(&[0, 0, 0, 0, 0, 0], twins(Some(&[0, 0]))),
+            Some(vec![0])
+        );
+        // Derivation is independent of the origin: an RGB colour resolves against either.
+        assert_eq!(
+            bkgd_for(&[0, 20, 0, 90, 0, 220], twins(Some(&[0]))),
+            Some(vec![2])
+        );
     }
 
     #[test]
