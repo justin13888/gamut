@@ -29,7 +29,18 @@
 //! of the file. Such a file exits non-zero saying it was not verified, distinctly from a damaged
 //! one. To keep that rare, the walk's budget here is a gigabyte rather than the decoder's 64 MiB,
 //! which is past any real image — at the decoder's budget every PNG over 4096x4096 RGBA8 would go
-//! unread.
+//! unread. That gigabyte bounds the *image*, not what a small file may inflate to: past the
+//! decoder's default budget the walk also refuses, before inflating, a stream that would grow to
+//! more than sixty-four times its own length, so a megabyte declaring a 16k×16k header over a zlib
+//! stream of zeros is reported as not verified (over budget), never inflated to a gigabyte.
+//!
+//! The gate is therefore **asymmetric across formats, and deliberately so**. A TIFF or DNG walk
+//! reads directories and tags, never pixel data, so there is no step in it this reader can decline
+//! and `is_fully_accounted()` never depends on the reader's budget. A PNG's verification step *is*
+//! an inflation, and inflation can be declined; so PNG alone has a third outcome — not damaged,
+//! not verified — and exits non-zero for it with its own message, distinct from a damaged file's.
+//! Gating PNG on `is_intact()` instead would make the two formats symmetric in wording and
+//! asymmetric in strength: a TIFF's exit 0 means the walk read everything, and a PNG's would not.
 //!
 //! For PNG the same walk answers a second question: **where did the bytes go?** The report carries
 //! the per-chunk-type breakdown, the compressed IDAT total against the filtered stream it inflates
