@@ -1,5 +1,6 @@
 //! The AVIF still-image encoder: RGB → identity planes → AV1 temporal unit → ISOBMFF container.
 
+use core::ops::Range;
 use std::sync::{Arc, Mutex};
 
 use gamut_av1::{
@@ -9,15 +10,59 @@ use gamut_color::{
     BitDepth, ChromaSubsampling, ColorRange, ColourPrimaries, MatrixCoefficients, Planar8,
     Planar16, RgbToYcbcr, TransferCharacteristics,
 };
-use gamut_core::{Dimensions, EncodeImage, Gray8, ImageRef, Result, Rgb8, Rgb16, Rgba8, Rgba16};
+use gamut_core::{
+    Dimensions, EncodeImage, Error, Gray8, ImageRef, Pixel, Result, Rgb8, Rgb16, Rgba8, Rgba16,
+};
 use gamut_isobmff::{
-    ColourInformation, IsoBmffImage, Item, ItemReference, NclxColr, Property, PropertyKind, write,
+    ColourInformation, IsoBmffImage, Item, ItemReference, NclxColr, Property, PropertyKind,
+    TopLevelBox, write,
 };
 
 use crate::backend::{Av1EncodeRequest, Av1StillEncoder, BackendPlanes, BackendSlot};
+use crate::c2pa::{C2PA_UUID, C2paBoxPurpose, content_provenance_payload, manifest_stores};
 use crate::config::{AvifConfig, AvifMode};
 use crate::image::ALPHA_AUX_URN;
 use crate::transform::{Mirror, Rotation};
+
+/// What the encoder writes into the store slot of the C2PA `uuid` box it emits.
+#[derive(Clone, PartialEq, Eq)]
+enum C2paSlot {
+    /// A slot of this many zero bytes, for an external signer to fill after encoding.
+    Reserved(usize),
+    /// A manifest store the caller has already computed over this exact output.
+    Store(Vec<u8>),
+}
+
+/// Prints the slot by kind and length, never the store bytes (opaque binary that would swamp the
+/// output).
+impl std::fmt::Debug for C2paSlot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Reserved(len) => write!(f, "Reserved({len})"),
+            Self::Store(store) => write!(f, "Store({})", store.len()),
+        }
+    }
+}
+
+/// What [`AvifEncoder::encode_with_report`] found out about the file it just produced, beyond the
+/// bytes: where the container placed the things a caller has to come back to.
+///
+/// Non-exhaustive: a later minor release may report more placements. Construct nothing here —
+/// the encoder fills it in.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub struct AvifEncodeReport {
+    /// The byte range of the C2PA manifest-store slot within the file — the `len` bytes of
+    /// [`with_c2pa_reserved`](AvifEncoder::with_c2pa_reserved), or the store handed to
+    /// [`with_c2pa`](AvifEncoder::with_c2pa) — or `None` when neither was configured.
+    ///
+    /// This is where a signer writes the finished store: nothing in the file after this range
+    /// moves when it is overwritten with a payload of the same length, so the offset reported here
+    /// is the offset the signer patches at. It is **not** a hash exclusion range — a BMFF asset's
+    /// hard binding excludes by box path, not byte offset (C2PA 2.4 §18.6, §A.5.6); see
+    /// [`C2paManifestStore`](crate::C2paManifestStore).
+    pub c2pa: Option<Range<usize>>,
+}
 
 /// The encoder's display-orientation transforms, applied by a reader at display time (the stored
 /// pixels are unchanged). Maps to the `irot`/`imir` item properties.
@@ -68,6 +113,9 @@ pub struct AvifEncoder {
     exif: Option<Vec<u8>>,
     /// An XMP packet, carried verbatim into a `mime` metadata item.
     xmp: Option<Vec<u8>>,
+    /// The C2PA manifest-store slot — reserved zeros or a caller-computed store — written into a
+    /// top-level `uuid` `ContentProvenanceBox` after `ftyp`.
+    c2pa: Option<C2paSlot>,
     /// Whether the colour values are premultiplied by alpha, emitted as a `prem` item reference.
     /// Meaningless without an alpha channel, so it reaches the file only for an RGBA encode.
     premultiplied: bool,
@@ -89,6 +137,7 @@ impl std::fmt::Debug for AvifEncoder {
             .field("icc", &self.icc.as_ref().map(Vec::len))
             .field("exif", &self.exif.as_ref().map(Vec::len))
             .field("xmp", &self.xmp.as_ref().map(Vec::len))
+            .field("c2pa", &self.c2pa)
             .field("premultiplied", &self.premultiplied)
             .field("backends", &self.backends.len())
             .finish()
@@ -126,6 +175,7 @@ impl AvifEncoder {
             icc: None,
             exif: None,
             xmp: None,
+            c2pa: None,
             premultiplied: false,
             backends: Vec::new(),
         }
@@ -152,6 +202,7 @@ impl AvifEncoder {
             icc: None,
             exif: None,
             xmp: None,
+            c2pa: None,
             premultiplied: false,
             backends: Vec::new(),
         }
@@ -421,6 +472,86 @@ impl AvifEncoder {
         self
     }
 
+    /// Reserves `len` bytes for a C2PA manifest store, for an external signer to fill in after
+    /// encoding.
+    ///
+    /// A manifest store cannot be handed to the encoder complete: its hard binding digests the
+    /// finished file, and the file does not exist until encoding ends (C2PA 2.4 §15.12.1.1). So the
+    /// encoder writes the store's container — a top-level `uuid` `ContentProvenanceBox` (§A.5.1)
+    /// with `box_purpose` `manifest` and a zero merkle offset, placed after `ftyp` and before `meta`
+    /// per §A.5.3 — around a slot of `len` **zero bytes**, and
+    /// [`encode_with_report`](Self::encode_with_report) tells the caller where that slot landed.
+    /// The signer then computes the store over the finished file and writes it into the slot. It
+    /// must fit: the store may be shorter than `len` (§A.5.3 permits unused padding after it, and a
+    /// store carries its own length) but never longer, since nothing in the file moves.
+    ///
+    /// The box is invisible to an AVIF reader — libavif decodes a file carrying it to the same
+    /// pixels as one without — and its bytes are opaque to this crate, which validates nothing
+    /// about them. A slot nobody fills reads back through [`AvifContainer::c2pa`](crate::AvifContainer::c2pa)
+    /// as `len` zero bytes. Calling this, or [`with_c2pa`](Self::with_c2pa), twice keeps the
+    /// **last** call.
+    #[must_use]
+    pub fn with_c2pa_reserved(mut self, len: usize) -> Self {
+        self.c2pa = Some(C2paSlot::Reserved(len));
+        self
+    }
+
+    /// Writes `store` — a C2PA manifest store the caller has **already computed over this exact
+    /// output** — into the `ContentProvenanceBox` the encoder emits.
+    ///
+    /// This is the second pass of the reserve-then-fill flow, for a caller that re-encodes rather
+    /// than patching: the framing is identical to [`with_c2pa_reserved`](Self::with_c2pa_reserved)
+    /// with the slot holding `store` instead of zeros, so an encoder that is otherwise configured
+    /// the same puts the same bytes everywhere outside the slot. It is not a way to attach a store
+    /// computed over some other file — such a store's hard binding will not verify — and the
+    /// workspace's metadata facade never hands one over (its C2PA policy is to locate and carry,
+    /// never to originate). The bytes are carried verbatim; nothing inside them is parsed or
+    /// checked. Calling this, or `with_c2pa_reserved`, twice keeps the **last** call.
+    #[must_use]
+    pub fn with_c2pa(mut self, store: &[u8]) -> Self {
+        self.c2pa = Some(C2paSlot::Store(store.to_vec()));
+        self
+    }
+
+    /// Encodes `image` as [`EncodeImage::encode_to_vec`] would, and additionally reports where the
+    /// container placed what a caller has to come back to — today the C2PA manifest-store slot
+    /// ([`AvifEncodeReport::c2pa`]).
+    ///
+    /// The bytes are exactly the bytes `encode_to_vec` produces: this is the same encode with a
+    /// report alongside, not a different code path, so the object-safe `EncodeImage` entry point
+    /// stays what it is. The range is found by running the crate's own locator over the finished
+    /// file — the same one [`AvifContainer::c2pa`](crate::AvifContainer::c2pa) uses — so what the
+    /// encoder reports is, by construction, what a reader of the file finds.
+    ///
+    /// # Errors
+    ///
+    /// As [`EncodeImage::encode_image`]; additionally [`Error::InvalidInput`] if a C2PA slot was
+    /// configured but cannot be located in the file just written, which would mean the writer and
+    /// the locator disagree about the box framing and is never expected.
+    pub fn encode_with_report<P: Pixel>(
+        &self,
+        image: ImageRef<'_, P>,
+    ) -> Result<(Vec<u8>, AvifEncodeReport)>
+    where
+        Self: EncodeImage<P>,
+    {
+        let bytes = self.encode_to_vec(image)?;
+        let c2pa = match self.c2pa {
+            None => None,
+            Some(_) => {
+                let (segments, _) = gamut_isobmff::walk_segments(&bytes)?;
+                let store = manifest_stores(&segments).next().ok_or_else(|| {
+                    Error::invalid_input(
+                        env!("CARGO_PKG_NAME"),
+                        "AVIF: the C2PA box this encoder wrote cannot be located in its own output",
+                    )
+                })?;
+                Some(store.range)
+            }
+        };
+        Ok((bytes, AvifEncodeReport { c2pa }))
+    }
+
     /// Records an `irot` display [`Rotation`] applied by a reader (the stored pixels are unchanged,
     /// so this captures e.g. a camera's EXIF orientation without re-encoding rotated samples).
     /// [`Rotation::None`] writes no `irot`. Returns the updated encoder for chaining.
@@ -596,7 +727,22 @@ impl AvifEncoder {
                 xmp.clone(),
             ));
         }
-        let image = IsoBmffImage::new(*b"avif", compatible_brands(&items), PRIMARY_ITEM_ID, items);
+        let mut image =
+            IsoBmffImage::new(*b"avif", compatible_brands(&items), PRIMARY_ITEM_ID, items);
+        // The C2PA `ContentProvenanceBox` is a top-level box, not an item: `push_top_level_box`
+        // places it `AfterFtyp` — between `ftyp` and `meta`, so before the first `mdat` (C2PA 2.4
+        // §A.5.3) — and the slot is zeros or the caller's store behind the §A.5.1 framing.
+        if let Some(slot) = &self.c2pa {
+            let payload = match slot {
+                C2paSlot::Reserved(len) => {
+                    content_provenance_payload(C2paBoxPurpose::Manifest, &vec![0u8; *len])
+                }
+                C2paSlot::Store(store) => {
+                    content_provenance_payload(C2paBoxPurpose::Manifest, store)
+                }
+            };
+            image.push_top_level_box(TopLevelBox::uuid(C2PA_UUID, payload));
+        }
         write(&image)
     }
 
@@ -1575,6 +1721,72 @@ mod tests {
         assert!(
             set.contains("xmp: Some(0)"),
             "an empty payload is still set: {set}"
+        );
+        // The C2PA slot prints its kind and length — a reserved slot is distinguishable from a
+        // caller-supplied store of the same size, and neither dumps bytes.
+        assert!(bare.contains("c2pa: None"), "{bare}");
+        let reserved = format!("{:?}", AvifEncoder::new().with_c2pa_reserved(4096));
+        assert!(
+            reserved.contains("c2pa: Some(Reserved(4096))"),
+            "{reserved}"
+        );
+        let store = format!("{:?}", AvifEncoder::new().with_c2pa(&payload(0x55, 3)));
+        assert!(store.contains("c2pa: Some(Store(3))"), "{store}");
+    }
+
+    #[test]
+    fn with_c2pa_reserved_emits_one_content_provenance_box_after_ftyp() {
+        use gamut_isobmff::{TopLevelPosition, read};
+        // The slot is a *top-level* box, never an item: the item list and the primary's
+        // properties are exactly what an unconfigured encoder writes, and `top_level_boxes` gains
+        // one `uuid` box with the §A.5.1 user type, placed `AfterFtyp` (§A.5.3), whose payload is
+        // the §A.5.1.2 framing around `len` zero bytes.
+        let img = read(&encode_with(
+            AvifEncoder::new().with_c2pa_reserved(96),
+            34,
+            18,
+        ))
+        .expect("parses");
+        assert_eq!(img.items.len(), 1, "no item is added");
+        assert_eq!(img.items[0].properties.len(), 4, "no property is added");
+        assert_eq!(img.top_level_boxes.len(), 1);
+        let top = &img.top_level_boxes[0];
+        assert_eq!(top.ty, *b"uuid");
+        assert_eq!(top.user_type, Some(C2PA_UUID));
+        assert_eq!(top.position, TopLevelPosition::AfterFtyp);
+        assert_eq!(
+            top.payload,
+            content_provenance_payload(C2paBoxPurpose::Manifest, &[0u8; 96])
+        );
+        // `with_c2pa` writes the store where the zeros would be, under the same framing.
+        let store = payload(0x66, 96);
+        let img = read(&encode_with(AvifEncoder::new().with_c2pa(&store), 34, 18)).expect("parses");
+        assert_eq!(
+            img.top_level_boxes[0].payload,
+            content_provenance_payload(C2paBoxPurpose::Manifest, &store)
+        );
+        // Neither knob set: no top-level box at all (the byte-identity guarantee).
+        let img = read(&encode_with(AvifEncoder::new(), 34, 18)).expect("parses");
+        assert!(img.top_level_boxes.is_empty());
+    }
+
+    #[test]
+    fn the_last_c2pa_call_wins_whichever_kind_it_is() {
+        // The two knobs set one slot, so the later call replaces the earlier one in both orders.
+        let store = payload(0x77, 8);
+        assert_eq!(
+            AvifEncoder::new()
+                .with_c2pa(&store)
+                .with_c2pa_reserved(16)
+                .c2pa,
+            Some(C2paSlot::Reserved(16))
+        );
+        assert_eq!(
+            AvifEncoder::new()
+                .with_c2pa_reserved(16)
+                .with_c2pa(&store)
+                .c2pa,
+            Some(C2paSlot::Store(store))
         );
     }
 

@@ -48,6 +48,20 @@ AV1 bitstream is cross-checked against `libaom` (the AV1 reference codec) and `d
 doctests, and the `libavif` round-trip/remux integration tests; B–H rows are owned by `gamut-av1`
 and evidenced by its `libaom`/`dav1d` differential suite; J rows by `gamut-color`'s tests.
 
+**C2PA carriage (issue #444, epic #239).** The encoder reserves or writes a C2PA manifest store
+as a top-level `uuid` `ContentProvenanceBox` (C2PA 2.4 §A.5.1) placed after `ftyp` and before
+`meta` (§A.5.3, via `IsoBmffImage::push_top_level_box`): `AvifEncoder::with_c2pa_reserved(len)`
+writes the §A.5.1.2 framing — zero `FullBox` version/flags, `box_purpose` `manifest`, a zero
+8-byte merkle offset — around `len` zero bytes for an external signer to fill, `with_c2pa(bytes)`
+writes a store the caller has already computed over this exact output, and
+`AvifEncoder::encode_with_report` returns the slot's file range beside the (unchanged) bytes, so
+the offset is known before the signer runs. Nothing after placement moves a byte
+(`tests/c2pa.rs`, exact-byte). The read side, `AvifContainer::c2pa` / `c2pa_manifest_stores`,
+locates every top-level C2PA `uuid` box and reports its purpose, slot bytes and file range. The
+object-safe `EncodeImage` entry point is untouched. libavif and dav1d decode a file carrying the
+box to the same pixels as one without. See the C2PA note under section L for the three recorded
+limits of the locator.
+
 **Deferred (planned, additive).** Every ☐ row below: 4:2:0/4:2:2 and `MA1B` landed with
 #390/#391, the alpha auxiliary, `Gray8` and monochrome surface with #396/#397, and the 10/12-bit
 path end to end with #398/#399, and subsampled chroma on the `Rgb16` path with #399 — what remains
@@ -125,6 +139,7 @@ adding it needs no container change.
 | `idat` inline item data | 14496-12 | ☐ | M5 |
 | `thmb` thumbnail item | 23008-12 | ☐ | M5 |
 | Exif / XMP metadata items + `cdsc` ref | AVIF §9.1.2; 23008-12 | ✅ (`AvifEncoder::with_exif`/`with_xmp`) | M4 |
+| C2PA `ContentProvenanceBox`: top-level `uuid` (user type `D8FEC3D6-…-C481`) after `ftyp`, `box_purpose` `manifest`, zero merkle offset, a reserved zero slot or a caller-computed store; slot range via `encode_with_report` | C2PA 2.4 §A.5.1, §A.5.3 | ✅ (#444; `AvifEncoder::with_c2pa_reserved`/`with_c2pa`) | D |
 | `a1op` operating-point sel / `a1lx` layered index / `lsel` layer sel (layered/progressive stills) | AVIF §2.3 | ☐ | D |
 | `dinf`/`dref` external data references | AVIF §9.1.2 | OOS | OOS |
 | sequence tracks: `moov`/`trak`/`mdia`/`stbl`, `av01` sample entry, `av1C` in `stsd` | 14496-12; AV1-ISOBMFF §3 | OOS | OOS |
@@ -330,6 +345,21 @@ pipeline (`decode.rs`), **S4** the libavif/dav1d differential oracle (`tests/con
 | `clap`/`irot`/`imir` application in `ipma` order (2022 `imir` axis semantics) | 23008-12:2022 §6.5.12; 14496-12 §12.1.4 | ✅ | S3 |
 | `iovl` overlay compositing (source-over, canvas fill, clipping) | 23008-12 §6.6.2.3.3 | ✅ | S3 |
 | libavif structure/metadata/pixels + dav1d planar bit-exact differential suite | (oracle) | ✅ | S4 |
+| C2PA manifest-store locator (`AvifContainer::c2pa` / `c2pa_manifest_stores`): every top-level `uuid` box with the C2PA user type → `box_purpose`, slot bytes, file range, in file order | C2PA 2.4 §A.5.1–§A.5.3; §18.6 | ✅ (#444) | — |
+
+**C2PA locator — three recorded limits (#444).** (1) *The slot, not the store.* `bytes`/`range`
+run from just after the 8-byte merkle offset to the end of the `uuid` box, so they include any
+unused padding §A.5.3 permits after the store, and a reserved-but-unfilled slot reads back as
+zeros. `gamut-heic`'s locator (#429) instead trims to the store's own JUMBF `LBox`; the two crates
+therefore report different bounds for the same file today. Sharing one lens through
+`gamut-isobmff`, and deciding the bound once, is **#505** — the reverse path is to replace this
+module's parse with a call into it. (2) *`update` framing is assumed.* §A.5.3 states the merkle
+offset only for `manifest`/`original`; the same 8-byte prefix is applied to `update` (the layout
+the reference implementation writes) rather than probed, since a box-bounded slot has no in-band
+length to probe with. (3) *The range is not an exclusion range.* BMFF assets bind with
+`c2pa.hash.bmff.v3`, which excludes by box path (§18.6, §A.5.6); the range is for patching and
+byte accounting, and no type is named "exclusion". The reserve → sign → validate direction
+against `c2pa-rs` is #447's.
 
 **Deferred (additive) for the decode surface:** the backend registry + `gamut-codec-abi` adapter
 around `Av1StillDecoder` — section M reserves its name and shape; the typed trait itself already
