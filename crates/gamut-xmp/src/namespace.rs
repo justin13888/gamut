@@ -41,9 +41,15 @@ impl From<WellKnownNs> for Namespace {
 }
 
 /// The standard XMP schemas (Adobe XMP Parts 1–2), plus the external schemas image metadata
-/// standards layer on XMP. Each maps to a fixed namespace URI and a conventional prefix via
-/// [`WellKnownNs::uri`] / [`WellKnownNs::prefix`]; [`WellKnownNs::from_uri`] recovers the schema
-/// from a URI.
+/// standards and widely deployed tools layer on XMP. Each maps to a fixed namespace URI and a
+/// conventional prefix via [`WellKnownNs::uri`] / [`WellKnownNs::prefix`];
+/// [`WellKnownNs::from_uri`] recovers the schema from a URI.
+///
+/// This is a **namespace registry, not a validator**: registering a schema fixes the prefix its
+/// properties serialize under (the one the reference engine, exiv2's Adobe XMPCore, keys them by),
+/// and nothing more — property values stay uninterpreted text. The set covers every schema exiv2
+/// documents (<https://exiv2.org/metadata.html>); the non-Adobe URIs are each cited on their
+/// variant, and all thirty are cross-checked against XMPCore's own registry in `tests/oracle.rs`.
 ///
 /// Marked `#[non_exhaustive]`: the registry grows as gamut's format and metadata crates need
 /// further schemas, and each addition must not be a breaking change. Match with a wildcard arm,
@@ -89,6 +95,82 @@ pub enum WellKnownNs {
     /// key C2PA 2.4 §11.5 / §15.5.3.1 uses to point at an **external** manifest store; gamut only
     /// registers the namespace — the C2PA reading of the property lives in `gamut-metadata`.
     DcTerms,
+    /// `exifEX` — Exif 2.3+ properties in XMP (`LensModel`, `PhotographicSensitivity`, …), the
+    /// XMP counterpart of the tags `gamut-exif` reads.
+    ///
+    /// URI `http://cipa.jp/exif/1.0/`, from CIPA DC-010-2012 "Exif metadata for XMP" (referenced,
+    /// not reproduced, by Adobe XMP Part 2 §3.4) and registered under that URI by exiv2
+    /// (`third_party/exiv2/src/properties.cpp`, `xmpNsInfo`). The vendored Exif 3.0 text
+    /// (`references/exif/exif-3.0-dc-008-translation-2023.pdf`, Annex J.2–J.3) binds the same
+    /// `exifEX` prefix to `http://cipa.jp/exif/2.32/` in its *annotation* (`exifEX:ExifAN`)
+    /// examples; that URI is not registered here — the reference engine and deployed writers use
+    /// `1.0`, and a second variant can be added without a breaking change if a consumer needs it.
+    ExifEx,
+    /// `aux` — Exif auxiliary camera/lens properties (`aux:Lens`, `aux:SerialNumber`, …),
+    /// ubiquitous in Lightroom and Camera Raw output.
+    ///
+    /// URI `http://ns.adobe.com/exif/1.0/aux/`, Adobe's "Exif Schema for Additional Exif
+    /// Properties" (present in the 2008/2010 editions of XMP Part 2, dropped from the vendored
+    /// 2016 text); registered by exiv2 (`third_party/exiv2/src/properties.cpp`, `xmpNsInfo`).
+    Aux,
+    /// `plus` — the PLUS (Picture Licensing Universal System) License Data Format.
+    ///
+    /// URI `http://ns.useplus.org/ldf/xmp/1.0/`, from the PLUS LDF XMP specification
+    /// (<https://ns.useplus.org/LDF/ldf-XMPSpecification>); registered by exiv2
+    /// (`third_party/exiv2/src/properties.cpp`, `xmpNsInfo`).
+    Plus,
+    /// `mwg-rs` — Metadata Working Group image regions (`mwg-rs:Regions`).
+    ///
+    /// URI `http://www.metadataworkinggroup.com/schemas/regions/`, from the MWG *Guidelines for
+    /// Handling Image Metadata* 2.0 (2010), "Regions" schema; registered by exiv2
+    /// (`third_party/exiv2/src/properties.cpp`, `xmpNsInfo`).
+    MwgRegions,
+    /// `mwg-kw` — Metadata Working Group hierarchical keywords (`mwg-kw:Keywords`).
+    ///
+    /// URI `http://www.metadataworkinggroup.com/schemas/keywords/`, from the MWG *Guidelines for
+    /// Handling Image Metadata* 2.0 (2010), "Keywords" schema; registered by exiv2
+    /// (`third_party/exiv2/src/properties.cpp`, `xmpNsInfo`).
+    MwgKeywords,
+    /// `GPano` — Google Photo Sphere (panorama) metadata.
+    ///
+    /// URI `http://ns.google.com/photos/1.0/panorama/`, from Google's *Photo Sphere XMP Metadata*
+    /// specification; registered by exiv2 (`third_party/exiv2/src/properties.cpp`, `xmpNsInfo`).
+    GPano,
+    /// `lr` — Adobe Lightroom (`lr:hierarchicalSubject`, `lr:privateRTKInfo`).
+    ///
+    /// URI `http://ns.adobe.com/lightroom/1.0/`, Adobe's Lightroom schema (not part of the
+    /// published XMP Parts 1–3); registered by exiv2 (`third_party/exiv2/src/properties.cpp`,
+    /// `xmpNsInfo`).
+    Lightroom,
+    /// `MicrosoftPhoto` — Microsoft Photo 1.0 (Windows Photo Gallery / Explorer rating and camera
+    /// fields).
+    ///
+    /// URI `http://ns.microsoft.com/photo/1.0/`, Microsoft's Photo schema; registered by exiv2
+    /// (`third_party/exiv2/src/properties.cpp`, `xmpNsInfo`).
+    MicrosoftPhoto,
+    /// `digiKam` — digiKam photo-management properties (`digiKam:TagsList`,
+    /// `digiKam:ColorLabel`, …).
+    ///
+    /// URI `http://www.digikam.org/ns/1.0/`, digiKam's own schema; registered by exiv2
+    /// (`third_party/exiv2/src/properties.cpp`, `xmpNsInfo`).
+    DigiKam,
+    /// `acdsee` — ACDSee photo-management properties.
+    ///
+    /// URI `http://ns.acdsee.com/iptc/1.0/`, ACDSee's own schema; registered by exiv2
+    /// (`third_party/exiv2/src/properties.cpp`, `xmpNsInfo`).
+    Acdsee,
+    /// `crss` — Camera Raw Saved Settings (snapshots), the companion of `crs` (Camera Raw
+    /// settings, Part 2 §3.3).
+    ///
+    /// URI `http://ns.adobe.com/camera-raw-saved-settings/1.0/`, Adobe's Camera Raw Saved Settings
+    /// schema (not part of the published XMP Parts 1–3); registered by exiv2
+    /// (`third_party/exiv2/src/properties.cpp`, `xmpNsInfo`).
+    CameraRawSavedSettings,
+    /// `dwc` — Darwin Core biodiversity terms in XMP (`dwc:Record`, `dwc:Event`, …).
+    ///
+    /// URI `http://rs.tdwg.org/dwc/index.htm`, the TDWG Darwin Core namespace as it is used in
+    /// XMP; registered by exiv2 (`third_party/exiv2/src/properties.cpp`, `xmpNsInfo`).
+    DarwinCore,
 }
 
 impl WellKnownNs {
@@ -112,6 +194,18 @@ impl WellKnownNs {
         WellKnownNs::Dimensions,
         WellKnownNs::ResourceRef,
         WellKnownNs::DcTerms,
+        WellKnownNs::ExifEx,
+        WellKnownNs::Aux,
+        WellKnownNs::Plus,
+        WellKnownNs::MwgRegions,
+        WellKnownNs::MwgKeywords,
+        WellKnownNs::GPano,
+        WellKnownNs::Lightroom,
+        WellKnownNs::MicrosoftPhoto,
+        WellKnownNs::DigiKam,
+        WellKnownNs::Acdsee,
+        WellKnownNs::CameraRawSavedSettings,
+        WellKnownNs::DarwinCore,
     ];
 
     /// The schema's namespace URI — its canonical identity.
@@ -119,7 +213,8 @@ impl WellKnownNs {
     /// `dc` is Dublin Core (Part 1 §8.3); the `xmp*` schemas are Part 1 §8.4–8.6; `photoshop`,
     /// `crs` are Part 2 §3.2–3.3. `exif`/`tiff` mirror the EXIF tags into XMP (Part 2 §3.4, defined
     /// by CIPA DC-010); `Iptc4xmpCore`/`Iptc4xmpExt` are the IPTC Photo Metadata schemas;
-    /// `dcterms` is the DCMI Metadata Terms namespace (`http://purl.org/dc/terms/`).
+    /// `dcterms` is the DCMI Metadata Terms namespace (`http://purl.org/dc/terms/`). The URIs of
+    /// the schemas outside the published XMP Parts are cited on each variant.
     #[must_use]
     pub const fn uri(self) -> &'static str {
         match self {
@@ -141,6 +236,20 @@ impl WellKnownNs {
             WellKnownNs::Dimensions => "http://ns.adobe.com/xap/1.0/sType/Dimensions#",
             WellKnownNs::ResourceRef => "http://ns.adobe.com/xap/1.0/sType/ResourceRef#",
             WellKnownNs::DcTerms => "http://purl.org/dc/terms/",
+            WellKnownNs::ExifEx => "http://cipa.jp/exif/1.0/",
+            WellKnownNs::Aux => "http://ns.adobe.com/exif/1.0/aux/",
+            WellKnownNs::Plus => "http://ns.useplus.org/ldf/xmp/1.0/",
+            WellKnownNs::MwgRegions => "http://www.metadataworkinggroup.com/schemas/regions/",
+            WellKnownNs::MwgKeywords => "http://www.metadataworkinggroup.com/schemas/keywords/",
+            WellKnownNs::GPano => "http://ns.google.com/photos/1.0/panorama/",
+            WellKnownNs::Lightroom => "http://ns.adobe.com/lightroom/1.0/",
+            WellKnownNs::MicrosoftPhoto => "http://ns.microsoft.com/photo/1.0/",
+            WellKnownNs::DigiKam => "http://www.digikam.org/ns/1.0/",
+            WellKnownNs::Acdsee => "http://ns.acdsee.com/iptc/1.0/",
+            WellKnownNs::CameraRawSavedSettings => {
+                "http://ns.adobe.com/camera-raw-saved-settings/1.0/"
+            }
+            WellKnownNs::DarwinCore => "http://rs.tdwg.org/dwc/index.htm",
         }
     }
 
@@ -167,6 +276,18 @@ impl WellKnownNs {
             WellKnownNs::Dimensions => "stDim",
             WellKnownNs::ResourceRef => "stRef",
             WellKnownNs::DcTerms => "dcterms",
+            WellKnownNs::ExifEx => "exifEX",
+            WellKnownNs::Aux => "aux",
+            WellKnownNs::Plus => "plus",
+            WellKnownNs::MwgRegions => "mwg-rs",
+            WellKnownNs::MwgKeywords => "mwg-kw",
+            WellKnownNs::GPano => "GPano",
+            WellKnownNs::Lightroom => "lr",
+            WellKnownNs::MicrosoftPhoto => "MicrosoftPhoto",
+            WellKnownNs::DigiKam => "digiKam",
+            WellKnownNs::Acdsee => "acdsee",
+            WellKnownNs::CameraRawSavedSettings => "crss",
+            WellKnownNs::DarwinCore => "dwc",
         }
     }
 
@@ -206,6 +327,80 @@ mod tests {
             assert_eq!(WellKnownNs::from_uri(ns.uri()), Some(ns));
             assert!(!ns.prefix().is_empty());
         }
+    }
+
+    #[test]
+    fn exiv2_documented_schemas_have_exact_uris_and_prefixes() {
+        // The twelve schemas added for exiv2 parity (issue #421). Each pair is the exact string
+        // exiv2's registry binds (`third_party/exiv2/src/properties.cpp`), so the prefix gamut
+        // serializes under is the key the reference engine reads back by; the differential check
+        // is `tests/oracle.rs`. Near-misses are the likely defects: `exifEX` vs `exifEx`, `aux/`
+        // under `exif/1.0/` (not a sibling of it), `crss` vs the `crs` it complements, and
+        // `photo/1.0/` (not exiv2's separate `MP` = `photo/1.2/`).
+        let expected = [
+            (WellKnownNs::ExifEx, "http://cipa.jp/exif/1.0/", "exifEX"),
+            (WellKnownNs::Aux, "http://ns.adobe.com/exif/1.0/aux/", "aux"),
+            (
+                WellKnownNs::Plus,
+                "http://ns.useplus.org/ldf/xmp/1.0/",
+                "plus",
+            ),
+            (
+                WellKnownNs::MwgRegions,
+                "http://www.metadataworkinggroup.com/schemas/regions/",
+                "mwg-rs",
+            ),
+            (
+                WellKnownNs::MwgKeywords,
+                "http://www.metadataworkinggroup.com/schemas/keywords/",
+                "mwg-kw",
+            ),
+            (
+                WellKnownNs::GPano,
+                "http://ns.google.com/photos/1.0/panorama/",
+                "GPano",
+            ),
+            (
+                WellKnownNs::Lightroom,
+                "http://ns.adobe.com/lightroom/1.0/",
+                "lr",
+            ),
+            (
+                WellKnownNs::MicrosoftPhoto,
+                "http://ns.microsoft.com/photo/1.0/",
+                "MicrosoftPhoto",
+            ),
+            (
+                WellKnownNs::DigiKam,
+                "http://www.digikam.org/ns/1.0/",
+                "digiKam",
+            ),
+            (
+                WellKnownNs::Acdsee,
+                "http://ns.acdsee.com/iptc/1.0/",
+                "acdsee",
+            ),
+            (
+                WellKnownNs::CameraRawSavedSettings,
+                "http://ns.adobe.com/camera-raw-saved-settings/1.0/",
+                "crss",
+            ),
+            (
+                WellKnownNs::DarwinCore,
+                "http://rs.tdwg.org/dwc/index.htm",
+                "dwc",
+            ),
+        ];
+        for (ns, uri, prefix) in expected {
+            assert_eq!(ns.uri(), uri, "{ns:?}");
+            assert_eq!(ns.prefix(), prefix, "{ns:?}");
+            assert!(
+                WellKnownNs::ALL.contains(&ns),
+                "{ns:?} must be in ALL so from_uri and the writer's prefix table see it"
+            );
+        }
+        // 18 entries before this change (the original 17 plus `dcterms`) and twelve added: 30.
+        assert_eq!(WellKnownNs::ALL.len(), 30);
     }
 
     #[test]
