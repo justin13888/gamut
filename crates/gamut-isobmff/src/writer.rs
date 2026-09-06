@@ -94,8 +94,14 @@ fn validate(image: &IsoBmffImage) -> Result<()> {
     Ok(())
 }
 
+/// The largest header a top-level box carries: the 8-byte size/type plus a `uuid` box's 16-byte
+/// user type. The 4 GiB bound below applies it to every box type, so a non-`uuid` box is refused
+/// 16 bytes early — a deliberate simplification at an edge no still image approaches.
+const TOP_LEVEL_HEADER_MAX: usize = 24;
+
 /// A top-level box must be one the model does not already emit, must pair its `user_type` with the
-/// `uuid` type exactly as [`crate::RawBox`] does, and must fit a 32-bit box size.
+/// `uuid` type exactly as [`crate::RawBox`] does, and its complete box (header included) must fit
+/// the 32-bit size field.
 fn validate_top_level(top: &TopLevelBox) -> Result<()> {
     match &top.ty {
         b"ftyp" | b"meta" | b"mdat" => {
@@ -118,7 +124,7 @@ fn validate_top_level(top: &TopLevelBox) -> Result<()> {
             "ISOBMFF: user_type is required for uuid boxes and forbidden otherwise",
         ));
     }
-    if u32::try_from(top.payload.len()).is_err() {
+    if u32::try_from(top.payload.len().saturating_add(TOP_LEVEL_HEADER_MAX)).is_err() {
         return Err(Error::unsupported(
             env!("CARGO_PKG_NAME"),
             "ISOBMFF: top-level box at or beyond 4 GiB",
