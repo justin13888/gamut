@@ -424,7 +424,8 @@ struct ChunkTally {
     /// Type → its index in `stats`. Dropped at the end of the walk; never surfaced.
     index: HashMap<[u8; 4], usize>,
     /// Lookup work done so far, in entries examined — the probe that makes this type's
-    /// complexity assertable by count rather than by clock. See [`record`](Self::record).
+    /// complexity assertable by count rather than by clock. Charged by
+    /// [`lookup`](Self::lookup), which is where the examining happens.
     #[cfg(test)]
     probes: usize,
 }
@@ -442,17 +443,11 @@ impl ChunkTally {
 
     /// Adds one chunk of `chunk_type` carrying `payload_len` payload bytes.
     ///
-    /// The lookup accounts one probe per entry it examines: a hash lookup examines one, so a
-    /// file of N chunks costs N probes whatever its number of distinct types. Any replacement
-    /// lookup strategy must account its work here the same way — a linear scan, one per entry
-    /// compared — which is what lets the inline test bound the walk at O(N) instead of timing it.
+    /// All of its lookup work goes through [`lookup`](Self::lookup), which is where that work is
+    /// accounted.
     fn record(&mut self, chunk_type: [u8; 4], payload_len: usize) {
-        #[cfg(test)]
-        {
-            self.probes += 1;
-        }
-        match self.index.get(&chunk_type) {
-            Some(&at) => {
+        match self.lookup(chunk_type) {
+            Some(at) => {
                 self.stats[at].count += 1;
                 self.stats[at].payload_bytes += payload_len;
             }
@@ -465,6 +460,28 @@ impl ChunkTally {
                 });
             }
         }
+    }
+
+    /// Where `chunk_type`'s entry sits in `stats`, if it has one — the tally's **only** lookup,
+    /// and the only place the probe counter is charged.
+    ///
+    /// The charge is one per entry the strategy *examines*, made where the examining happens: a
+    /// hash lookup examines the single entry its bucket holds, whatever `stats` already contains,
+    /// so it charges one and N chunks cost N probes. The linear scan this replaced compares
+    /// entries in a loop, so the same rule charges one per comparison from inside that loop, and
+    /// N chunks of N distinct types cost about N²/2 — which is what makes
+    /// `the_tally_probes_once_per_chunk_whatever_the_number_of_distinct_types` fail if the
+    /// quadratic walk ever comes back, instead of bounding the walk by the clock. A replacement
+    /// strategy must keep that rule; charging once per call regardless of the work done would
+    /// leave the test asserting nothing.
+    fn lookup(&mut self, chunk_type: [u8; 4]) -> Option<usize> {
+        let at = self.index.get(&chunk_type).copied();
+        #[cfg(test)]
+        {
+            // One bucket entry examined, whatever `stats` holds.
+            self.probes += 1;
+        }
+        at
     }
 
     /// The accumulated totals, in first-appearance order.
@@ -1059,11 +1076,13 @@ mod tests {
     }
 
     /// The complexity claim itself, by count rather than by clock: N chunks cost N lookup
-    /// probes however many distinct types they use. A linear scan over `stats` — the defect the
-    /// index replaced, quadratic in the number of distinct types — accounts one probe per entry
-    /// compared and lands near N²/2 here; the hash lookup accounts exactly one per record. Two
-    /// files of the same chunk count, one with every type distinct and one with a single type,
-    /// must cost the same. Wall-clock timing of the same claim belongs to `benches/`.
+    /// probes however many distinct types they use. [`ChunkTally::lookup`] charges one probe per
+    /// entry it examines, so a linear scan over `stats` — the defect the index replaced,
+    /// quadratic in the number of distinct types — charges one per comparison and costs
+    /// 2 096 128 probes here (measured, N²/2 to the entry), while the hash lookup charges exactly
+    /// one per record. Two files of the same chunk count, one with every type distinct and one
+    /// with a single type, must cost the same. Wall-clock timing of the same claim belongs to
+    /// `benches/`.
     #[test]
     fn the_tally_probes_once_per_chunk_whatever_the_number_of_distinct_types() {
         const CHUNKS: usize = 2048;
