@@ -62,7 +62,8 @@ fn remux_with_a_c2pa_uuid_box_preserves_decoded_pixels() {
     // after `ftyp` and before the first `mdat` per §A.5.3 (`TopLevelPosition::AfterFtyp`) — must be
     // invisible to a conforming reader: libavif decodes the container carrying it to exactly the
     // pixels it decodes from the original. The payload is opaque bytes standing in for a manifest
-    // store; nothing here validates it.
+    // store; nothing here validates it. Where the box lands is pinned exact-byte in
+    // gamut-isobmff's `tests/top_level.rs`, not here.
     let src = std::fs::read(corpus_444()).expect("read the corpus fixture");
     let mut model = gamut_isobmff::read(&src).expect("gamut-isobmff reads the foreign container");
     model.top_level_boxes.push(TopLevelBox::uuid(
@@ -70,14 +71,6 @@ fn remux_with_a_c2pa_uuid_box_preserves_decoded_pixels() {
         b"opaque-manifest-store".to_vec(),
     ));
     let with_box = gamut_isobmff::write(&model).expect("gamut-isobmff writes the container");
-    assert_eq!(&with_box[4..8], b"ftyp");
-    let ftyp_len =
-        u32::from_be_bytes([with_box[0], with_box[1], with_box[2], with_box[3]]) as usize;
-    assert_eq!(
-        &with_box[ftyp_len + 4..ftyp_len + 8],
-        b"uuid",
-        "placed right after ftyp"
-    );
 
     let original = libavif_oracle::decode_avif(&src).expect("libavif decodes the original");
     let carrying = libavif_oracle::decode_avif(&with_box)
