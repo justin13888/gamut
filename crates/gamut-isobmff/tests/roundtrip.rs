@@ -260,3 +260,9 @@ fn top_level_boxes() {
     ]);
     assert_roundtrips(&img);
 }
+
+#[test]
+fn ftyp_minor_version() {
+    // A non-zero minor version, set through the builder, survives the cycle.
+    assert_roundtrips(&image(vec![av01_item(1, vec![2; 4])]).with_minor_version(0x0102_0304));
+}
