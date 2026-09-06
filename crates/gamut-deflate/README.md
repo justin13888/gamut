@@ -34,8 +34,11 @@ Output size in bytes (zlib streams; lower is better), reproduced by `cargo bench
 | ----------------------------- | -----: | ------------: | --------: | ---------------: | -------: |
 | RFC 1951 spec text (36 KB)    | 36 945 |    **10 664** |    11 112 |           11 130 |   10 544 |
 | English text ×300             | 13 500 |       **103** |       110 |              107 |      103 |
-| Rust source (`lz77.rs`)       | 30 610 |     **9 521** |     9 854 |            9 856 |    9 459 |
+| Rust source (`lz77.rs` at `4f2c2a4`) | 25 031 | **8 003** |     8 268 |            8 269 |    7 950 |
 | pseudo-random (~incompressible)| 20 000 |     **2 236** |     2 290 |            2 291 |    2 122 |
+
+The `lz77.rs` row compresses this crate's own match finder, so it is pinned to one revision of the
+file (the `cargo bench` run compresses whatever the file currently is).
 
 `Level::Best` lands ~2–7% below `zlib -9` and within ~1% of `zopfli` on real text and source, now
 that the optimal parse prices each match length at its own nearest distance (zopfli's `sublen`)

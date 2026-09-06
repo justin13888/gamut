@@ -56,8 +56,9 @@ the `lz77.rs` row is the file at that head for both columns, since this change e
 
 In `tests/default_bytes.rs` two `Best` pins moved, both down — `skewed` 1061 → 1048, `mixed`
 21643 → 21601 — and no row grew at any level. The synthetic rows are unchanged because their matches
-are either all at distance 1 (`ramp20k`), essentially absent (`pseudo20k`) or one exact period
-(`text.x300`), so the nearest distance for a short length *is* the longest match's distance. The
+are either all at one period (`ramp20k`, a 256-byte sawtooth, so distance 256; `text.x300`, a
+45-byte sentence) or essentially absent (`pseudo20k`), so the nearest distance for a short length
+*is* the longest match's distance. The
 remaining gap on real inputs is the pass budget and the count-floor length limiter (below).
 `Level::Best` pays for the table: on the `rfc1950.txt` throughput input its fastest sample went
 22.88 → 24.68 ms (+7.9%; median 23.34 → 24.98 ms), measured back to back in one session — where the
