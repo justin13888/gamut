@@ -13,6 +13,17 @@ use crate::crc32::Crc32;
 /// The 8-byte PNG file signature (`\x89PNG\r\n\x1a\n`).
 pub(crate) const SIGNATURE: [u8; 8] = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
 
+/// The C2PA manifest-store chunk type (C2PA 2.4 §A.3.2), spelled for its property bits (PNG
+/// §5.4, Table 6): `c` ancillary, `a` private, `B` reserved bit clear, `X` **unsafe to copy**.
+///
+/// The last bit is the point. A PNG editor that rewrites the image must drop an unrecognised
+/// unsafe-to-copy chunk (§14.2), and a C2PA manifest store is bound to the exact bytes it was
+/// signed over (§18.5), so a store copied forward into a rewritten file is invalid by
+/// construction. That is the same no-copy-forward law `gamut_metadata::C2paPolicy` states for
+/// the facade, here enforced by the container's own naming convention — which is why the type is
+/// spelled in exactly one place and its *bits* are asserted, not only its letters.
+pub(crate) const CABX: [u8; 4] = *b"caBX";
+
 /// Appends a complete chunk (`length`, `type`, `data`, `CRC`) to `out`.
 pub(crate) fn write_chunk(out: &mut Vec<u8>, chunk_type: [u8; 4], data: &[u8]) {
     out.extend_from_slice(&(data.len() as u32).to_be_bytes());
@@ -43,6 +54,52 @@ impl RawChunk<'_> {
     pub(crate) fn is_ancillary(&self) -> bool {
         self.chunk_type[0] & 0x20 != 0
     }
+}
+
+/// Where a C2PA manifest store sits in a PNG: the `caBX` chunk's whole span and, inside it, the
+/// store's own bytes. Reported by
+/// [`PngEncoder::encode_with_report`](crate::PngEncoder::encode_with_report) for a file just
+/// written and by [`PngReport::c2pa`](crate::PngReport::c2pa) for any file.
+///
+/// Non-exhaustive: a later revision may name a further range without a breaking change.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct C2paSpan {
+    /// The whole chunk — length, type, payload **and CRC**, `12 + payload` bytes. The range a
+    /// `c2pa.hash.data` exclusion must cover (C2PA 2.4 §18.5.4): the store's bytes change when it
+    /// is written, the length field when it is resized, and the CRC with either, so a hash that
+    /// keeps any of them breaks on the store's first update.
+    pub chunk: Range<usize>,
+    /// The store's bytes alone — the chunk's payload, `chunk.start + 8 .. chunk.end - 4`. What a
+    /// signer overwrites when it fills a reservation.
+    pub payload: Range<usize>,
+}
+
+impl C2paSpan {
+    /// The span of a `caBX` chunk occupying `chunk` (framing included), single-sourcing the
+    /// framing arithmetic for both reports.
+    pub(crate) fn of(chunk: Range<usize>) -> Self {
+        Self {
+            payload: chunk.start + 8..chunk.end - 4,
+            chunk,
+        }
+    }
+}
+
+/// Locates the manifest store in a PNG: the first CRC-valid `caBX` chunk, or `None`.
+///
+/// The first CRC-valid one, because that is the chunk the decoder surfaces as its `c2pa` payload
+/// (§13.1 skips a CRC mismatch), so the span a caller excludes from a hash is the store it reads.
+/// Stops at end of input or at the first chunk that does not frame; a stream that is not a PNG
+/// has no store.
+pub(crate) fn find_c2pa(png: &[u8]) -> Option<C2paSpan> {
+    let mut reader = ChunkReader::new(png).ok()?;
+    while let Ok(Some(chunk)) = reader.next_chunk() {
+        if chunk.chunk_type == CABX && chunk.crc_ok {
+            return Some(C2paSpan::of(chunk.range));
+        }
+    }
+    None
 }
 
 /// Iterates the chunks of a PNG stream after validating the signature (§5.2).
@@ -202,6 +259,68 @@ mod tests {
         let chunk = reader.next_chunk().unwrap().unwrap();
         assert!(!chunk.crc_ok);
         assert!(chunk.is_ancillary());
+    }
+
+    /// The property bits of `caBX` (PNG §5.4, Table 6), asserted on the constant rather than on
+    /// its letters: bit 5 of each byte is the property, and a typo that flips one — `cABX`, a
+    /// public chunk; `caBx`, one an editor may copy forward — still reads as a plausible name.
+    /// C2PA §A.3.2 requires ancillary, private and not safe to copy; PNG §5.4 requires the
+    /// reserved bit clear. Note the polarity of the fourth byte: **clear** (uppercase) is unsafe
+    /// to copy.
+    #[test]
+    fn cabx_property_bits_are_ancillary_private_reserved_clear_and_unsafe_to_copy() {
+        const PROPERTY: u8 = 0x20;
+        assert_ne!(CABX[0] & PROPERTY, 0, "byte 0: ancillary (lowercase)");
+        assert_ne!(CABX[1] & PROPERTY, 0, "byte 1: private (lowercase)");
+        assert_eq!(
+            CABX[2] & PROPERTY,
+            0,
+            "byte 2: reserved bit clear (uppercase)"
+        );
+        assert_eq!(CABX[3] & PROPERTY, 0, "byte 3: unsafe to copy (uppercase)");
+        assert_eq!(CABX, [0x63, 0x61, 0x42, 0x58]);
+    }
+
+    /// The span arithmetic at known offsets: a chunk at `33..52` (a 7-byte payload after the
+    /// signature and IHDR) has its payload at `41..48`. Every byte of the framing is accounted
+    /// — 4 length, 4 type ahead of the payload, 4 CRC behind it.
+    #[test]
+    fn a_c2pa_span_names_the_whole_chunk_and_the_payload_inside_it() {
+        let mut png = SIGNATURE.to_vec();
+        write_chunk(&mut png, *b"IHDR", &[0; 13]);
+        write_chunk(&mut png, CABX, b"jumbf!!");
+        write_chunk(&mut png, *b"IEND", &[]);
+        let span = find_c2pa(&png).expect("a caBX chunk");
+        assert_eq!(span.chunk, 33..52);
+        assert_eq!(span.payload, 41..48);
+        assert_eq!(&png[span.payload.clone()], b"jumbf!!");
+        assert_eq!(&png[span.chunk.start + 4..span.chunk.start + 8], b"caBX");
+        // Nothing but the chunk: the span ends exactly where IEND's length field begins.
+        assert_eq!(&png[span.chunk.end + 4..span.chunk.end + 8], b"IEND");
+    }
+
+    /// The store the span names is the one the decoder reads: a `caBX` whose CRC does not match
+    /// is skipped on decode (§13.1), so it is skipped here too, and the CRC-valid one after it
+    /// is the store. A stream with no `caBX`, or no signature, has none.
+    #[test]
+    fn find_c2pa_skips_a_crc_mismatch_and_names_the_first_valid_store() {
+        let mut png = SIGNATURE.to_vec();
+        write_chunk(&mut png, *b"IHDR", &[0; 13]);
+        write_chunk(&mut png, CABX, b"corrupt");
+        let last = png.len() - 1;
+        png[last] ^= 0xFF; // the first store's CRC no longer matches
+        let valid_start = png.len();
+        write_chunk(&mut png, CABX, b"valid");
+        write_chunk(&mut png, *b"IEND", &[]);
+        let span = find_c2pa(&png).expect("the CRC-valid caBX");
+        assert_eq!(span.chunk, valid_start..valid_start + 12 + 5);
+        assert_eq!(&png[span.payload], b"valid");
+
+        let mut none = SIGNATURE.to_vec();
+        write_chunk(&mut none, *b"IHDR", &[0; 13]);
+        write_chunk(&mut none, *b"IEND", &[]);
+        assert_eq!(find_c2pa(&none), None);
+        assert_eq!(find_c2pa(b"not a png"), None);
     }
 
     #[test]

@@ -2,19 +2,22 @@
 //! §11.3) — the read-side twin of the `ancillary` writers.
 //!
 //! Metadata payloads are surfaced **raw** — `eXIf` bytes, the inflated ICC profile, the XMP
-//! packet — precisely so callers can hand them to `gamut_metadata::MetadataBlock`
-//! (`Exif`/`Icc`/`Xmp`) without gamut-png depending on the metadata stack. Fixed-layout
-//! colour-space chunks (`gAMA`/`cHRM`/`sRGB`/`cICP`) are additionally parsed into values, in the
-//! same ×100 000 fixed-point units the encoder accepts. Ancillary payloads are attacker
-//! territory: a malformed payload skips that chunk (§13.1) rather than failing the image, and
-//! compressed payloads (iCCP/zTXt/iTXt) inflate under one cumulative byte budget so a metadata
-//! zlib bomb cannot exhaust memory.
+//! packet, the C2PA manifest store — precisely so callers can hand them to
+//! `gamut_metadata::MetadataBlock` (`Exif`/`Icc`/`Xmp`/`C2pa`) without gamut-png depending on
+//! the metadata stack. Fixed-layout colour-space chunks (`gAMA`/`cHRM`/`sRGB`/`cICP`) are
+//! additionally parsed into values, in the same ×100 000 fixed-point units the encoder accepts.
+//! Ancillary payloads are attacker territory: a malformed payload skips that chunk (§13.1)
+//! rather than failing the image, and compressed payloads (iCCP/zTXt/iTXt) inflate under one
+//! cumulative byte budget so a metadata zlib bomb cannot exhaust memory. The manifest store
+//! (`caBX`, C2PA 2.4 §A.3.2) is uncompressed but attacker-sized, so its bytes are charged to the
+//! same budget rather than copied beside it.
 
 use gamut_core::{
     Gray8, Gray16, GrayAlpha8, GrayAlpha16, ImageBuf, Indexed8, Rgb8, Rgb16, Rgba8, Rgba16,
 };
 
 use crate::ancillary::SrgbIntent;
+use crate::chunk::CABX;
 use crate::color::ColorType;
 use crate::decoder::TransparencyKey;
 use crate::inflate;
@@ -142,6 +145,16 @@ pub struct DecodedPng {
     /// The XMP packet (the `XML:com.adobe.xmp` iTXt, §11.3.3.2), decompressed if stored
     /// compressed. Feed as `MetadataBlock::Xmp`.
     pub xmp: Option<Vec<u8>>,
+    /// The C2PA manifest store (the `caBX` chunk, C2PA 2.4 §A.3.2) verbatim: the JUMBF bytes,
+    /// uncompressed, exactly as the chunk carries them — opaque here, never parsed or judged.
+    /// Feed as `MetadataBlock::C2pa`. The first `caBX` in the file, and only when it fits the
+    /// metadata budget; see [`c2pa_duplicates`](Self::c2pa_duplicates).
+    pub c2pa: Option<Vec<u8>>,
+    /// How many further `caBX` chunks followed the first, saturating at 255. A file carries
+    /// exactly one manifest store — PNG has no multi-chunk store, unlike JPEG's APP11 run — so
+    /// any value above zero marks a malformed file whose extra stores were ignored rather than
+    /// concatenated.
+    pub c2pa_duplicates: u8,
     /// tEXt/zTXt/iTXt annotations in file order (the XMP packet is excluded).
     pub texts: Vec<TextChunk>,
     /// gAMA: image gamma × 100 000 (§11.3.2.2) — the unit the encoder's `with_gamma` writes.
@@ -165,7 +178,8 @@ pub struct DecodedPng {
 ///
 /// Unlike `gamut_jpeg::JpegMetadata` and `gamut_webp::WebpMetadata`, which carry only
 /// EXIF/XMP/ICC, this also surfaces PNG's parsed colour chunks — `cICP`, `sRGB`, `gAMA`, `cHRM` —
-/// because those are uncompressed and answer "what colour space is this?" on their own.
+/// because those are uncompressed and answer "what colour space is this?" on their own, and the
+/// C2PA manifest store (`caBX`), raw.
 ///
 /// Marked `#[non_exhaustive]` so further ancillary chunks can be added without a breaking change.
 ///
@@ -198,6 +212,16 @@ pub struct PngMetadata {
     /// The XMP packet (the `XML:com.adobe.xmp` iTXt, §11.3.3.2), decompressed if stored
     /// compressed. Feed as `MetadataBlock::Xmp`.
     pub xmp: Option<Vec<u8>>,
+    /// The C2PA manifest store (the `caBX` chunk, C2PA 2.4 §A.3.2) verbatim and uncompressed —
+    /// opaque bytes, never parsed or judged. Feed as `MetadataBlock::C2pa`. The first `caBX` in
+    /// the file, and only when it fits the metadata budget; see
+    /// [`c2pa_duplicates`](Self::c2pa_duplicates).
+    pub c2pa: Option<Vec<u8>>,
+    /// How many further `caBX` chunks followed the first, saturating at 255. A file carries
+    /// exactly one manifest store — PNG has no multi-chunk store, unlike JPEG's APP11 run — so
+    /// any value above zero marks a malformed file whose extra stores were ignored rather than
+    /// concatenated.
+    pub c2pa_duplicates: u8,
     /// tEXt/zTXt/iTXt annotations in file order (the XMP packet is excluded).
     pub texts: Vec<TextChunk>,
     /// gAMA: image gamma × 100 000 (§11.3.2.2).
@@ -211,15 +235,30 @@ pub struct PngMetadata {
 }
 
 /// Parses the metadata-bearing ancillary chunks collected from the stream (in file order).
-/// Malformed payloads skip their chunk (§13.1); compressed payloads share `budget` bytes of
-/// inflated output, and a payload that would bust the remainder is skipped, not an error.
-/// Once-only chunks keep their first occurrence.
+/// Malformed payloads skip their chunk (§13.1); compressed payloads — and the uncompressed but
+/// attacker-sized `caBX` store — share `budget` bytes of output, and a payload that would bust
+/// the remainder is skipped, not an error. Once-only chunks keep their first occurrence; a
+/// second `caBX` is additionally counted, since exactly one store is the rule (C2PA §A.3.2).
 pub(crate) fn collect(chunks: &[([u8; 4], &[u8])], budget: usize) -> PngMetadata {
     let mut meta = PngMetadata::default();
     let mut budget = budget;
+    // Whether a `caBX` has been seen at all, admitted or not: the first is the store (or is
+    // skipped for its size), every later one is a duplicate — never promoted into its place.
+    let mut seen_c2pa = false;
     for &(chunk_type, data) in chunks {
         match &chunk_type {
             b"eXIf" if meta.exif.is_none() => meta.exif = Some(data.to_vec()),
+            _ if chunk_type == CABX => {
+                if seen_c2pa {
+                    meta.c2pa_duplicates = meta.c2pa_duplicates.saturating_add(1);
+                } else {
+                    seen_c2pa = true;
+                    if data.len() <= budget {
+                        budget -= data.len();
+                        meta.c2pa = Some(data.to_vec());
+                    }
+                }
+            }
             b"iCCP" if meta.icc_profile.is_none() => {
                 meta.icc_profile = parse_iccp(data, &mut budget);
             }
@@ -518,6 +557,61 @@ mod tests {
         assert_eq!(meta.chromaticities.unwrap().white, (1, 2));
         assert_eq!(meta.srgb, Some(SrgbIntent::Perceptual));
         assert_eq!(meta.cicp.unwrap().color_primaries, 9);
+    }
+
+    /// Exactly one store per file: the first `caBX` is the store and every later one is counted,
+    /// never concatenated onto it and never promoted into its place — PNG has no multi-chunk
+    /// store, unlike JPEG's APP11 run (C2PA §A.3.2).
+    #[test]
+    fn the_first_cabx_is_the_store_and_later_ones_are_counted_not_concatenated() {
+        let meta = collect(
+            &[(CABX, b"first store"), (CABX, b"second"), (CABX, b"third")],
+            1024,
+        );
+        assert_eq!(meta.c2pa.as_deref(), Some(&b"first store"[..]));
+        assert_eq!(meta.c2pa_duplicates, 2);
+
+        let single = collect(&[(CABX, b"only")], 1024);
+        assert_eq!(single.c2pa.as_deref(), Some(&b"only"[..]));
+        assert_eq!(single.c2pa_duplicates, 0);
+        assert_eq!(collect(&[], 1024).c2pa, None);
+    }
+
+    /// The duplicate count saturates rather than wrapping: 256 further stores read as 255, not
+    /// as none at all.
+    #[test]
+    fn the_cabx_duplicate_count_saturates_at_255() {
+        let chunks: Vec<([u8; 4], &[u8])> = (0..257).map(|_| (CABX, &b"s"[..])).collect();
+        let meta = collect(&chunks, 1024);
+        assert_eq!(meta.c2pa_duplicates, 255);
+    }
+
+    /// `caBX` is attacker-sized like every other ancillary payload, so it is charged to the one
+    /// cumulative budget rather than copied beside it: a store exactly the size of the remaining
+    /// budget is admitted and leaves nothing for a compressed payload after it; one byte larger
+    /// is skipped — and, skipped, it is still the file's one store, so a smaller `caBX` after it
+    /// is a duplicate rather than a substitute.
+    #[test]
+    fn the_cabx_store_is_charged_to_the_metadata_budget() {
+        let ztxt: Vec<u8> = [b"kw\0\0".to_vec(), deflated(b"x")].concat();
+        let store = [7u8; 10];
+        let fits = collect(&[(CABX, &store), (*b"zTXt", &ztxt)], 10);
+        assert_eq!(
+            fits.c2pa.as_deref(),
+            Some(&store[..]),
+            "exactly the budget fits"
+        );
+        assert!(
+            fits.texts.is_empty(),
+            "the store consumed the budget, so the zTXt after it is skipped"
+        );
+
+        let busts = collect(&[(CABX, &store), (CABX, b"tiny")], 9);
+        assert_eq!(busts.c2pa, None, "one byte over the budget is skipped");
+        assert_eq!(
+            busts.c2pa_duplicates, 1,
+            "the skipped store is still the first; the next is a duplicate, not a substitute"
+        );
     }
 
     #[test]

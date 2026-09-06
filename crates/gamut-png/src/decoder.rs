@@ -39,7 +39,8 @@ use crate::{adam7, inflate, pack};
 /// `pub(crate)` because [`crate::deconstruct`] reports against the same budget: a file this
 /// decoder decodes is one the report walk will inflate to count filters.
 pub(crate) const DEFAULT_MAX_IMAGE_BYTES: usize = 64 << 20;
-/// Default cumulative cap on inflated metadata (iCCP/zTXt/iTXt) payloads: 16 MiB.
+/// Default cumulative cap on metadata payloads — inflated iCCP/zTXt/iTXt plus the raw `caBX`
+/// manifest store: 16 MiB.
 const DEFAULT_MAX_METADATA_BYTES: usize = 16 << 20;
 /// The spec's own dimension bound (§11.2.1): width and height are 1 ..= 2³¹ − 1.
 const SPEC_MAX_DIMENSION: u32 = i32::MAX as u32;
@@ -138,9 +139,10 @@ impl PngDecoder {
         self
     }
 
-    /// Caps the *cumulative* inflated size of compressed metadata payloads — iCCP, zTXt, and
-    /// compressed iTXt together (default 16 MiB). Payloads past the budget are skipped, not
-    /// errors; the typed [`DecodeImage`] path never inflates metadata at all.
+    /// Caps the *cumulative* size of metadata payloads — the inflated iCCP, zTXt and compressed
+    /// iTXt, plus the raw C2PA manifest store (`caBX`), which is uncompressed but sized by the
+    /// file, together (default 16 MiB). Payloads past the budget are skipped, not errors; the
+    /// typed [`DecodeImage`] path never inflates or copies metadata at all.
     #[must_use]
     pub fn with_max_metadata_bytes(mut self, bytes: usize) -> Self {
         self.max_metadata_bytes = bytes;
@@ -388,7 +390,7 @@ impl PngDecoder {
     /// Decodes a PNG into its native layout together with the ancillary metadata — the rich
     /// counterpart of the typed [`DecodeImage`] implementations, and the only way to reach the
     /// palette of an indexed image, the tRNS colour key, and the raw metadata payloads
-    /// (eXIf/ICC/XMP/text, plus parsed gAMA/cHRM/sRGB/cICP values).
+    /// (eXIf/ICC/XMP/text and the C2PA manifest store, plus parsed gAMA/cHRM/sRGB/cICP values).
     ///
     /// # Errors
     ///
@@ -415,6 +417,8 @@ impl PngDecoder {
             exif: meta.exif,
             icc_profile: meta.icc_profile,
             xmp: meta.xmp,
+            c2pa: meta.c2pa,
+            c2pa_duplicates: meta.c2pa_duplicates,
             texts: meta.texts,
             gamma: meta.gamma,
             chromaticities: meta.chromaticities,
@@ -610,10 +614,11 @@ fn walk_metadata_chunks(data: &[u8]) -> Result<Vec<([u8; 4], &[u8])>> {
 /// Reads a PNG's ancillary metadata without decoding any pixels.
 ///
 /// Walks the chunk stream, collecting the metadata-bearing ancillary chunks and inflating only
-/// the compressed ones (iCCP, zTXt, and compressed iTXt) under one cumulative 16 MiB budget.
-/// IDAT is skipped by length, so no pixel data is read, copied, or inflated — which makes this
-/// cheap enough for a probe on a large file. `cICP`, `sRGB`, `gAMA` and `cHRM` are uncompressed
-/// and cost nothing beyond the walk.
+/// the compressed ones (iCCP, zTXt, and compressed iTXt) under one cumulative 16 MiB budget,
+/// which the raw C2PA manifest store (`caBX`) is charged to as well. IDAT is skipped by length,
+/// so no pixel data is read, copied, or inflated — which makes this cheap enough for a probe on
+/// a large file. `cICP`, `sRGB`, `gAMA` and `cHRM` are uncompressed and cost nothing beyond the
+/// walk.
 ///
 /// The result matches [`PngDecoder::decode`] field for field on the same file. Use
 /// [`PngDecoder::metadata`] instead if you need a metadata budget other than the default.
