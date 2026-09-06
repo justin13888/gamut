@@ -730,6 +730,31 @@ fn fits_decode_budget(header: &ihdr::Ihdr, max_image_bytes: usize) -> bool {
     .is_some_and(|native| native <= max_image_bytes)
 }
 
+/// How many times its own length an IDAT stream may inflate, once the image it describes is past
+/// the decoder's default budget.
+///
+/// DEFLATE's ceiling is about 1032:1, so a stream at this ratio is either a large flat image or a
+/// bomb — and above [`DEFAULT_MAX_IMAGE_BYTES`] the walk stops assuming the former. A flat 16k×16k
+/// image is the one real file this declines, and it is declined as the reader's budget
+/// ([`SkippedFilterScan::OverBudget`]), not as damage.
+const INFLATION_RATIO: usize = 64;
+
+/// Whether a stream of `idat_len` compressed bytes may be inflated to `filtered_len`: it must
+/// carry at least a sixty-fourth of what it claims to inflate to. Inclusive, as
+/// [`fits_decode_budget`] is, and saturating — a stream too large to multiply is allowed anything,
+/// not wrapped to a small allowance that would refuse every huge file.
+///
+/// [`DeconstructLimits::max_image_bytes`] bounds the *image* a caller is willing to scan; this
+/// bounds the *file* against it, and [`scan_filters`] applies it only past the decoder's default
+/// budget, so every file the decoder inflates by default is scanned whatever its ratio. `gamut
+/// inspect` raises the image budget to a gigabyte so that a 16k×16k photograph is read, and that
+/// is right for a photograph — its IDAT is hundreds of megabytes. It is wrong for a megabyte
+/// declaring the same header over a zlib stream of zeros, which the header budget alone would
+/// inflate to that gigabyte before reading one filter byte.
+fn fits_inflation_ratio(filtered_len: usize, idat_len: usize) -> bool {
+    filtered_len <= idat_len.saturating_mul(INFLATION_RATIO)
+}
+
 /// Inflates the IDAT stream and counts the filter byte leading each scanline.
 ///
 /// Every early return names its own reason, so a caller can tell a file this reader declined to
@@ -743,6 +768,16 @@ fn scan_filters(
     max_image_bytes: usize,
 ) -> FilterScan {
     if !fits_decode_budget(header, max_image_bytes) {
+        return FilterScan::Skipped(SkippedFilterScan::OverBudget);
+    }
+    // The image fits the caller's budget; past the decoder's *default* budget the file still has
+    // to be one that can plausibly inflate to it. Checked before `inflate_zlib` runs, because
+    // `filtered_len` is the cap it would otherwise fill from a stream of any size. The floor is
+    // stated over the header, like the budget, not over the filtered length: the two differ by
+    // one filter byte per scanline, and an image exactly at the default budget must scan.
+    if !fits_decode_budget(header, DEFAULT_MAX_IMAGE_BYTES)
+        && !fits_inflation_ratio(filtered_len, idat.len())
+    {
         return FilterScan::Skipped(SkippedFilterScan::OverBudget);
     }
     let Ok(stream) = inflate::inflate_zlib(idat, filtered_len) else {
@@ -913,5 +948,77 @@ mod tests {
     #[test]
     fn an_overlap_is_not_fully_classified() {
         assert!(!report_with(&[(0, 20), (10, 33)], 33).is_fully_classified());
+    }
+
+    /// A PNG whose IHDR declares `width`×`height` RGBA8 over a zlib stream of `stream_len` zero
+    /// bytes — a stream far too short for the header, which is the point: whether the walk
+    /// inflates it at all is what the reason it reports tells apart.
+    fn png_declaring(width: u32, height: u32, stream_len: usize) -> Vec<u8> {
+        let mut idat = Vec::new();
+        gamut_deflate::DeflateEncoder::new().zlib_compress(&vec![0u8; stream_len], &mut idat);
+        let mut png = SIGNATURE.to_vec();
+        ihdr::write(&mut png, width, height, 8, ColorType::TruecolorAlpha);
+        crate::chunk::write_chunk(&mut png, *b"IDAT", &idat);
+        crate::chunk::write_chunk(&mut png, *b"IEND", &[]);
+        png
+    }
+
+    #[test]
+    fn a_declared_gigabyte_over_a_small_stream_is_refused_before_inflation() {
+        // 16384x16384 RGBA8 is exactly one gigabyte decoded, which `gamut inspect` budgets for
+        // (its ceiling is 1 << 30). Under the header budget alone the walk hands that gigabyte
+        // to `inflate_zlib` as the cap and a zlib bomb of zeros fills it from about a megabyte
+        // of input. The stream here is tiny, so without the ratio bound the walk inflates it
+        // completely and reports the *file's* `LengthMismatch`; with it, the walk reports its own
+        // `OverBudget` and never inflates — the reason is the discriminator.
+        let bomb = png_declaring(16384, 16384, 4096);
+        let generous = DeconstructLimits::default().with_max_image_bytes(1 << 30);
+        let report = deconstruct_with_limits(&bomb, generous).expect("deconstruct");
+        assert_eq!(
+            report.filters,
+            FilterScan::Skipped(SkippedFilterScan::OverBudget),
+            "a stream that would inflate to a gigabyte from four kilobytes is the reader's \
+             budget, not the file's damage"
+        );
+        assert_eq!(
+            report.filtered_len,
+            16384 * (16384 * 4 + 1),
+            "the header-derived figure is still reported"
+        );
+    }
+
+    #[test]
+    fn the_inflation_ratio_is_inclusive_and_saturates() {
+        // A stream may inflate to exactly sixty-four times its length and not one byte more.
+        assert!(fits_inflation_ratio(64 * 1000, 1000));
+        assert!(!fits_inflation_ratio(64 * 1000 + 1, 1000));
+        // An empty stream inflates to nothing.
+        assert!(fits_inflation_ratio(0, 0));
+        assert!(!fits_inflation_ratio(1, 0));
+        // Overflow saturates rather than wrapping to a small allowance that would refuse every
+        // huge stream.
+        assert!(fits_inflation_ratio(usize::MAX, usize::MAX / 2));
+    }
+
+    #[test]
+    fn an_image_inside_the_default_budget_is_scanned_whatever_its_ratio() {
+        // A flat image compresses thousands-fold and is a real PNG: 1024x1024 RGBA8 from a
+        // few dozen bytes of zlib. Its ratio is far past sixty-four, and it is inside the
+        // decoder's default budget, so it is inflated — and this one is sound, so it is
+        // counted. The floor is the header, not the filtered length: a scan refused here would
+        // be the walk declining a file the decoder decodes.
+        let side = 1024u32;
+        let stream_len = side as usize * (side as usize * 4 + 1);
+        let flat = png_declaring(side, side, stream_len);
+        let report = deconstruct(&flat).expect("deconstruct");
+        assert!(
+            report.idat_compressed * INFLATION_RATIO < stream_len,
+            "precondition: the fixture inflates by more than the ratio allows"
+        );
+        assert!(
+            report.filters.is_counted(),
+            "inside the default budget the ratio does not apply, got {:?}",
+            report.filters
+        );
     }
 }
