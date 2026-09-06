@@ -47,28 +47,29 @@
 ///
 /// Marked `#[non_exhaustive]` so a further provenance source can be added without a breaking
 /// change; match with a wildcard arm, or use [`is_embedded`](Self::is_embedded) and
-/// [`remote_url`](Self::remote_url), which answer the two underlying questions directly. The
-/// discriminants are explicit, append-only, and stable.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
+/// [`remote_url`](Self::remote_url), which answer the two underlying questions directly and are
+/// the C-portable surface of this type (a data-carrying enum has no observable tag, and `String`
+/// is not FFI-safe). There is deliberately no `Default`: this is a computed report, and a default
+/// of "no provenance" would be a confident answer nobody asked for.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[non_exhaustive]
-#[repr(u8)]
 pub enum ProvenanceState {
     /// No embedded manifest store and no `dcterms:provenance` URL. This is what the metadata
     /// says, not a validity verdict — the asset may still carry provenance by a route the file
     /// cannot express (see the [module docs](self) on the HTTP `Link` header).
-    #[default]
-    None = 0,
+    None,
     /// No embedded store; the XMP points at an external manifest at this URL (C2PA 2.4 §11.5).
-    /// The string is the `dcterms:provenance` value verbatim, unresolved and unvalidated.
-    Remote(String) = 1,
+    /// The string is the `dcterms:provenance` value with surrounding whitespace trimmed,
+    /// otherwise verbatim — unresolved and unvalidated.
+    Remote(String),
     /// A manifest store is embedded in the file ([`Metadata::c2pa`](crate::Metadata::c2pa) is
     /// `Some`) and the XMP carries no `dcterms:provenance` URL.
-    Embedded = 2,
+    Embedded,
     /// Both: a manifest store is embedded *and* the XMP carries a `dcterms:provenance` URL. The
     /// URL is reported because the file carries it; §11.5 makes the key external-only, and a
     /// validator that finds an embedded store uses it and does not consult the URL (§15.5.2.1,
     /// §15.5.3.1), so this variant says nothing about which manifest is authoritative.
-    EmbeddedAndRemote(String) = 3,
+    EmbeddedAndRemote(String),
 }
 
 impl ProvenanceState {
@@ -96,11 +97,6 @@ mod tests {
     use super::*;
 
     const URL: &str = "https://example.com/m.c2pa";
-
-    #[test]
-    fn default_is_none() {
-        assert_eq!(ProvenanceState::default(), ProvenanceState::None);
-    }
 
     #[test]
     fn is_embedded_is_true_for_exactly_the_embedded_variants() {
